@@ -1,0 +1,13 @@
+build/
+dist/
+__pycache__/
+*.pyc
+*.exe
+*.spec
+config.json
+.env
+.wechat_summary_tmp/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
