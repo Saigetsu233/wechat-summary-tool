@@ -739,14 +739,141 @@ def list_chatrooms(conn_msg, conn_session=None):
     return sorted(counts.items(), key=lambda item: item[1], reverse=True)
 
 
+def _decode_db_text(value):
+    """把数据库中的文本/字节统一成字符串，解码失败时返回空串。"""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+    return str(value)
+
+
+def _quote_sql_identifier(identifier):
+    """引用由 SQLite 元数据返回的表名或列名。"""
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def load_contact_name_map(conn_contact):
+    """读取联系人显示名，返回 {微信内部 username: 备注名/昵称/别名}。"""
+    if conn_contact is None:
+        return {}
+
+    try:
+        cur = conn_contact.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cur.fetchall()]
+        table = next((name for name in tables if name.lower() == "contact"), None)
+        if not table:
+            return {}
+
+        table_sql = _quote_sql_identifier(table)
+        cur.execute(f"PRAGMA table_info({table_sql})")
+        columns = [row[1] for row in cur.fetchall()]
+        column_by_lower = {column.lower(): column for column in columns}
+
+        username_column = next(
+            (
+                column_by_lower[name]
+                for name in ("username", "user_name", "usrname", "user_id")
+                if name in column_by_lower
+            ),
+            None,
+        )
+        if not username_column:
+            return {}
+
+        # 本地备注最能帮助用户辨认，其次使用微信昵称和微信号别名。
+        display_columns = []
+        for candidate in (
+            "remark",
+            "nick_name",
+            "nickname",
+            "alias",
+            "name",
+        ):
+            column = column_by_lower.get(candidate)
+            if column and column not in display_columns:
+                display_columns.append(column)
+
+        selected_columns = [username_column, *display_columns]
+        sql_columns = ", ".join(
+            _quote_sql_identifier(column) for column in selected_columns
+        )
+        cur.execute(f"SELECT {sql_columns} FROM {table_sql}")
+
+        result = {}
+        for row in cur.fetchall():
+            username = _decode_db_text(row[0]).strip()
+            if not username:
+                continue
+            display_name = next(
+                (
+                    _decode_db_text(value).strip()
+                    for value in row[1:]
+                    if _decode_db_text(value).strip()
+                ),
+                "",
+            )
+            result[username] = display_name or username
+        return result
+    except sqlite3.Error:
+        return {}
+
+
+def _load_sender_username_map(cursor):
+    """读取当前消息分库的 real_sender_id -> username 映射。"""
+    try:
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cursor.fetchall()]
+        table = next((name for name in tables if name.lower() == "name2id"), None)
+        if not table:
+            return {}
+        table_sql = _quote_sql_identifier(table)
+        cursor.execute(f"PRAGMA table_info({table_sql})")
+        columns = [row[1] for row in cursor.fetchall()]
+        column_by_lower = {column.lower(): column for column in columns}
+        username_column = next(
+            (
+                column_by_lower[name]
+                for name in ("user_name", "username", "usrname")
+                if name in column_by_lower
+            ),
+            None,
+        )
+        if not username_column:
+            return {}
+        cursor.execute(
+            f"SELECT rowid, {_quote_sql_identifier(username_column)} FROM {table_sql}"
+        )
+        return {
+            int(row_id): _decode_db_text(username).strip()
+            for row_id, username in cursor.fetchall()
+            if _decode_db_text(username).strip()
+        }
+    except (sqlite3.Error, TypeError, ValueError):
+        return {}
+
+
+def _split_sender_prefix(content, sender_username=""):
+    """移除群消息正文前的内部 username，但只在它确实是发送者时移除。"""
+    prefix, separator, body = content.partition(":\n")
+    if separator and (not sender_username or prefix == sender_username):
+        return sender_username or prefix, body
+    return sender_username, content
+
+
 def _collect_text_rows(conn_msg, chatroom_id, start_ts, end_ts=None):
-    """从所有消息分库收集文本消息，合并、去重并按时间排序。"""
+    """收集文本消息并保留发送者 username，跨分库合并、去重、排序。"""
     table = get_chatroom_table(chatroom_id)
     rows = []
     for shard_index, conn in enumerate(_message_connections(conn_msg)):
         cur = conn.cursor()
+        sender_usernames = _load_sender_username_map(cur)
         sql = (
-            f"SELECT create_time, message_content FROM {table} "
+            f"SELECT create_time, real_sender_id, message_content FROM {table} "
             "WHERE create_time >= ? AND local_type = 1"
         )
         params = [start_ts]
@@ -755,27 +882,58 @@ def _collect_text_rows(conn_msg, chatroom_id, start_ts, end_ts=None):
             params.append(end_ts)
         try:
             cur.execute(sql, params)
-            for row_index, (timestamp, content) in enumerate(cur.fetchall()):
-                rows.append((int(timestamp), shard_index, row_index, content))
+            fetched_rows = cur.fetchall()
         except sqlite3.Error:
-            # 群聊可能只存在于部分 message_N.db；缺表是正常情况。
-            continue
+            # 兼容没有 real_sender_id 的旧消息表；缺表则第二次查询也会失败。
+            legacy_sql = (
+                f"SELECT create_time, message_content FROM {table} "
+                "WHERE create_time >= ? AND local_type = 1"
+            )
+            if end_ts is not None:
+                legacy_sql += " AND create_time <= ?"
+            try:
+                cur.execute(legacy_sql, params)
+                fetched_rows = [
+                    (timestamp, None, content)
+                    for timestamp, content in cur.fetchall()
+                ]
+            except sqlite3.Error:
+                # 群聊可能只存在于部分 message_N.db；缺表是正常情况。
+                continue
+
+        for row_index, (timestamp, real_sender_id, content) in enumerate(fetched_rows):
+            try:
+                sender_username = sender_usernames.get(int(real_sender_id), "")
+            except (TypeError, ValueError):
+                sender_username = ""
+            rows.append(
+                (
+                    int(timestamp),
+                    shard_index,
+                    row_index,
+                    sender_username,
+                    content,
+                )
+            )
 
     rows.sort(key=lambda row: (row[0], row[1], row[2]))
     unique_rows = []
     seen_shards = {}
-    for timestamp, shard_index, _index, content in rows:
+    for timestamp, shard_index, _index, sender_username, content in rows:
         if not content:
             continue
-        if isinstance(content, bytes):
-            try:
-                content = content.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-        content_str = str(content)
+        content_str = _decode_db_text(content)
+        if not content_str:
+            continue
+        sender_username, content_str = _split_sender_prefix(
+            content_str, sender_username
+        )
+        content_str = content_str.strip()
+        if not content_str:
+            continue
         if content_str.lstrip().startswith("<"):
             continue
-        signature = (timestamp, content_str)
+        signature = (timestamp, sender_username, content_str)
         # 仅去掉分库边界处的跨分片重复；同一分片内同秒发送的相同文本
         # 可能是真实的连续消息，不能误删。
         first_shard = seen_shards.get(signature)
@@ -783,40 +941,63 @@ def _collect_text_rows(conn_msg, chatroom_id, start_ts, end_ts=None):
             continue
         if first_shard is None:
             seen_shards[signature] = shard_index
-        unique_rows.append((timestamp, content_str))
+        unique_rows.append((timestamp, sender_username, content_str))
     return unique_rows
 
 
-def get_messages(conn_msg, chatroom_id, days=1):
+def _sender_labels(rows, sender_name_map=None):
+    """生成稳定的人类可读标签，并区分同名群友且不暴露内部 username。"""
+    sender_name_map = sender_name_map or {}
+    senders = sorted({sender for _time, sender, _content in rows if sender})
+    fallback_numbers = {sender: index for index, sender in enumerate(senders, start=1)}
+    base_names = {}
+    for sender in senders:
+        name = _decode_db_text(sender_name_map.get(sender, "")).strip()
+        name = re.sub(r"[\r\n\t]+", " ", name).strip()
+        base_names[sender] = name or f"群友{fallback_numbers[sender]}"
+
+    grouped = {}
+    for sender, name in base_names.items():
+        grouped.setdefault(name, []).append(sender)
+
+    labels = {}
+    for name, same_name_senders in grouped.items():
+        ordered = sorted(same_name_senders)
+        if len(ordered) == 1:
+            labels[ordered[0]] = name
+        else:
+            for index, sender in enumerate(ordered, start=1):
+                labels[sender] = f"{name}（同名{index}）"
+    return labels
+
+
+def _format_text_messages(rows, sender_name_map, time_format):
+    labels = _sender_labels(rows, sender_name_map)
+    messages = []
+    for timestamp, sender_username, content_str in rows:
+        sender_label = labels.get(sender_username, "未知成员")
+        time_text = datetime.datetime.fromtimestamp(timestamp).strftime(time_format)
+        messages.append(f"[{time_text}] {sender_label}：{content_str}")
+    return messages
+
+
+def get_messages(conn_msg, chatroom_id, days=1, sender_name_map=None):
     """跨所有消息分库获取指定群聊最近 N 天的文本消息。"""
     since = int((datetime.datetime.now() - datetime.timedelta(days=days)).timestamp())
     rows = _collect_text_rows(conn_msg, chatroom_id, since)
-    messages = []
-    for timestamp, content_str in rows:
-        if ":\n" in content_str:
-            content_str = content_str.split(":\n", 1)[1]
-        content_str = content_str.strip()
-        if not content_str:
-            continue
-        time_text = datetime.datetime.fromtimestamp(timestamp).strftime("%H:%M")
-        messages.append(f"[{time_text}] {content_str}")
-
-    return messages
+    return _format_text_messages(rows, sender_name_map, "%H:%M")
 
 
-def get_messages_by_range(conn_msg, chatroom_id, start_ts: int, end_ts: int):
+def get_messages_by_range(
+    conn_msg,
+    chatroom_id,
+    start_ts: int,
+    end_ts: int,
+    sender_name_map=None,
+):
     """跨所有消息分库获取 [start_ts, end_ts] 内的文本消息。"""
     rows = _collect_text_rows(conn_msg, chatroom_id, start_ts, end_ts)
-    messages = []
-    for timestamp, content_str in rows:
-        if ":\n" in content_str:
-            content_str = content_str.split(":\n", 1)[1]
-        content_str = content_str.strip()
-        if not content_str:
-            continue
-        time_text = datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-        messages.append(f"[{time_text}] {content_str}")
-    return messages
+    return _format_text_messages(rows, sender_name_map, "%Y-%m-%d %H:%M")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -831,6 +1012,9 @@ DEFAULT_PROMPT_TEMPLATE = """\
 消息数量：{count} 条
 
 {messages}
+
+聊天记录中的每一行都严格采用“[时间] 发送者：消息正文”的格式。
+冒号前的“发送者”由微信数据库直接解析，是该条消息的真实发言人；正文里出现的其他昵称，只代表被提及、被回复或被引用的人，不代表那个人说了这句话。
 
 不要逐条复述聊天记录，而要从整体上识别：
 1. 持续时间较长、参与人数较多的话题
@@ -850,7 +1034,7 @@ DEFAULT_PROMPT_TEMPLATE = """\
 每个话题可以搭配 1 个贴合内容的 emoji，并在合适的位置加入一句表情包式短评，例如“（这合理吗.jpg）”“（懂得都懂👀）”“主打一个稳中带皮😂”；不要机械套用示例。
 
 👑 今日 MVP
-直接写“昵称｜一句有节目效果的称号”，下一行说明当选原因。必须基于当天的真实发言。
+直接写“昵称｜一句有节目效果的称号”，下一行说明当选原因。必须根据该昵称作为“发送者”的实际发言判断，不能因为他被别人频繁提到就把别人的话算到他头上。
 
 🏆 趣味成就
 给不同群友颁发 5～8 个搞笑成就，每项严格使用下面的纯文本形式：
@@ -864,7 +1048,8 @@ DEFAULT_PROMPT_TEMPLATE = """\
 4. 全文自然穿插 8～15 个 emoji 或文字表情梗，优先选择与话题相关的表情，如 😂、👀、🤡、🫡、🏂、🍿、💻；不要连续堆叠，也不要每句话都加。
 5. 可以偶尔使用“（地铁老人看手机.jpg）”“（默默打开购物软件）”这类表情包式旁白，但必须贴合上下文，全文最多 3 处。
 6. 可以玩梗、吐槽，但不要恶意攻击，不要杜撰原聊天中不存在的事实。
-7. 像一个潜水已久、很懂这个群的人来写：信息密度高，有娱乐性，松弛自然，不要油腻或过度夸张。"""
+7. 涉及具体群友的观点、人设、MVP 和成就时，必须以行首明确标注的发送者为准；拿不准归属就使用“有群友提到”，禁止猜测。
+8. 像一个潜水已久、很懂这个群的人来写：信息密度高，有娱乐性，松弛自然，不要油腻或过度夸张。"""
 
 # 模板中可用的占位符说明：
 # {date}      → 当前日期，如"2026年04月29日"
@@ -1041,11 +1226,13 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                 f"聊天记录较长，正在提炼第 {index}/{total_chunks} 段...",
             )
             partial_prompt = f"""\
-以下是同一个微信群聊记录的第 {index}/{total_chunks} 段：
+以下是同一个微信群聊记录的第 {index}/{total_chunks} 段。
+每行格式为“[时间] 发送者：消息正文”，发送者来自微信数据库；正文中被提及或引用的昵称不是当前发言人：
 
 {chunk}
 
 请提取本段的核心话题、有价值信息、明确结论、待办事项和重要链接。
+涉及个人观点或趣味事件时保留真实发送者，禁止把被提及者误当成发言人；证据不足则不要署名。
 忽略寒暄与无意义闲聊，保留具体事实，输出简洁的中文要点。"""
             partial_summaries.append(
                 _deepseek_chat(api_key, partial_prompt, max_tokens=1400)
@@ -1066,8 +1253,8 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                     f"正在合并长摘要，第 {reduce_round} 轮 {index}/{len(summary_groups)}...",
                 )
                 reduce_prompt = f"""\
-请合并下面这些同一群聊的分段摘要：去除重复，保留事实、结论、待办和链接，
-不要引入原文中没有的信息。输出结构紧凑的中文要点。
+请合并下面这些同一群聊的分段摘要：去除重复，保留事实、结论、待办、链接以及已经明确对应的发送者，
+不要引入原文中没有的信息，不要改变发言人与观点的对应关系。输出结构紧凑的中文要点。
 
 {group}"""
                 reduced.append(
@@ -1190,12 +1377,21 @@ def main():
     connections = []
     tmp_paths = []
     required_space = sum(os.path.getsize(path) for _index, path in message_files)
+    contact_db_path = os.path.join(db_storage, "contact", "contact.db")
+    if os.path.isfile(contact_db_path):
+        required_space += os.path.getsize(contact_db_path)
     message_temp_dir = select_decrypt_temp_dir(required_space)
+    contact_connection = None
 
     def cleanup_message_shards():
         for connection in connections:
             try:
                 connection.close()
+            except Exception:
+                pass
+        if contact_connection is not None:
+            try:
+                contact_connection.close()
             except Exception:
                 pass
         for path in tmp_paths:
@@ -1218,6 +1414,17 @@ def main():
             tmp_path = decrypt_db(msg_db, msg_key, temp_dir=message_temp_dir)
             tmp_paths.append(tmp_path)
             connections.append(sqlite3.connect(tmp_path))
+
+        if os.path.isfile(contact_db_path):
+            with open(contact_db_path, "rb") as source:
+                contact_salt = source.read(16).hex()
+            contact_key = key_map.get(contact_salt)
+            if contact_key:
+                contact_tmp_path = decrypt_db(
+                    contact_db_path, contact_key, temp_dir=message_temp_dir
+                )
+                tmp_paths.append(contact_tmp_path)
+                contact_connection = sqlite3.connect(contact_tmp_path)
         print(f"✅ {len(connections)} 个消息分库全部解密成功\n")
     except Exception as e:
         print(f"❌ 解密失败：{e}")
@@ -1240,11 +1447,13 @@ def main():
         input("按回车键关闭...")
         return
 
+    contact_name_map = load_contact_name_map(contact_connection)
     print(f"找到 {len(chatrooms)} 个群聊（按消息数量排序）：")
     print()
     display_count = min(20, len(chatrooms))
     for i, (cr, cnt) in enumerate(chatrooms[:display_count]):
-        print(f"  [{i+1:2d}] {cr.replace('@chatroom', '')}  （{cnt} 条历史消息）")
+        display_name = contact_name_map.get(cr, cr.replace('@chatroom', ''))
+        print(f"  [{i+1:2d}] {display_name}  （{cnt} 条历史消息）")
     if len(chatrooms) > display_count:
         print(f"  ... 还有 {len(chatrooms)-display_count} 个群（消息较少）")
 
@@ -1256,7 +1465,9 @@ def main():
         return
 
     selected_cr = chatrooms[int(choice) - 1][0]
-    group_name = selected_cr.replace("@chatroom", "")
+    group_name = contact_name_map.get(
+        selected_cr, selected_cr.replace("@chatroom", "")
+    )
 
     # ── 选时间范围 ──
     print()
@@ -1270,7 +1481,12 @@ def main():
 
     # ── 获取消息 ──
     print(f"\n正在读取群「{group_name}」最近{days}天的消息...")
-    messages = get_messages(connections, selected_cr, days=days)
+    messages = get_messages(
+        connections,
+        selected_cr,
+        days=days,
+        sender_name_map=contact_name_map,
+    )
 
     cleanup_message_shards()
 

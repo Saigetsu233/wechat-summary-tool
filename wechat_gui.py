@@ -31,6 +31,7 @@ from wechat_summary import (
     decrypt_db,
     select_decrypt_temp_dir,
     list_chatrooms,
+    load_contact_name_map,
     get_messages_by_range,
     ai_summarize,
     load_config,
@@ -55,6 +56,7 @@ class WeChatSummaryApp:
         self.tmp_msg_paths = []
         self.tmp_contact_path = None
         self.chatrooms = []   # [(chatroom_id, count, display_name), ...]
+        self.contact_name_map = {}
         self.config = load_config()
         self._initialized = False
         saved_prompt = self.config.get("prompt_template") or ""
@@ -336,6 +338,7 @@ class WeChatSummaryApp:
         self.conn_contact = None
         self.tmp_msg_paths = []
         self.tmp_contact_path = None
+        self.contact_name_map = {}
 
     # ─────────────────────────────────────────────────────────────────────────
     # 初始化流程
@@ -473,58 +476,14 @@ class WeChatSummaryApp:
                 )
                 self.conn_contact = sqlite3.connect(self.tmp_contact_path, check_same_thread=False)
 
-    def _get_contact_name_map(self):
-        """返回 {chatroom_id: nick_name}，动态检测列名"""
-        if not self.conn_contact:
-            return {}
-        try:
-            cur = self.conn_contact.cursor()
-            # 找 contact 表（可能叫 contact 或 Contact）
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = [r[0] for r in cur.fetchall()]
-            tbl = next((t for t in tables if t.lower() == "contact"), None)
-            if not tbl:
-                return {}
-
-            # 动态检测列名
-            cur.execute(f"PRAGMA table_info({tbl})")
-            cols = [row[1] for row in cur.fetchall()]
-            cols_lower = [c.lower() for c in cols]
-
-            # 找 user_name 列（群ID）
-            name_col = None
-            for candidate in ("user_name", "username", "UsrName", "user_id", "id"):
-                if candidate.lower() in cols_lower:
-                    name_col = cols[cols_lower.index(candidate.lower())]
-                    break
-            if not name_col:
-                # 取第一列
-                name_col = cols[0] if cols else None
-
-            # 找 nick_name 列（昵称）
-            nick_col = None
-            for candidate in ("nick_name", "nickname", "NickName", "remark", "Remark", "alias", "name"):
-                if candidate.lower() in cols_lower:
-                    nick_col = cols[cols_lower.index(candidate.lower())]
-                    break
-
-            if not name_col or not nick_col:
-                return {}
-
-            cur.execute(
-                f"SELECT {name_col}, {nick_col} FROM {tbl} "
-                f"WHERE {name_col} LIKE '%@chatroom'"
-            )
-            return {row[0]: row[1] for row in cur.fetchall() if row[1]}
-        except Exception:
-            return {}
-
     def _load_chatrooms(self):
         rooms = list_chatrooms(self.conn_msg)
-        name_map = self._get_contact_name_map()
+        self.contact_name_map = load_contact_name_map(self.conn_contact)
         self.chatrooms = []
         for cr_id, count in rooms:
-            nick = name_map.get(cr_id, cr_id.replace("@chatroom", ""))
+            nick = self.contact_name_map.get(
+                cr_id, cr_id.replace("@chatroom", "")
+            )
             display = f"{nick}  （{count} 条消息）"
             self.chatrooms.append((cr_id, count, display))
 
@@ -580,7 +539,13 @@ class WeChatSummaryApp:
             end_ts = int(datetime.datetime.combine(end_d, datetime.time.max).timestamp())
 
             # 读消息
-            messages = get_messages_by_range(self.conn_msg, chatroom_id, start_ts, end_ts)
+            messages = get_messages_by_range(
+                self.conn_msg,
+                chatroom_id,
+                start_ts,
+                end_ts,
+                sender_name_map=self.contact_name_map,
+            )
             n = len(messages)
 
             if not messages:
