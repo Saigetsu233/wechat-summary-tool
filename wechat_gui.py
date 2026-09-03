@@ -37,17 +37,18 @@ from wechat_summary import (
     load_config,
     save_config,
     DEFAULT_PROMPT_TEMPLATE,
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    provider_default_model,
+    provider_label,
 )
-
-DEFAULT_API_KEY = ""  # 请填入你自己的 DeepSeek API Key
-
 
 class WeChatSummaryApp:
     def __init__(self, root):
         self.root = root
         self.root.title("微信群聊 AI 总结工具")
         self.root.resizable(True, True)
-        self.root.minsize(620, 700)
+        self.root.minsize(700, 780)
 
         # 后端状态
         self.key_map = {}
@@ -59,6 +60,29 @@ class WeChatSummaryApp:
         self.contact_name_map = {}
         self.config = load_config()
         self._initialized = False
+
+        configured_provider = str(self.config.get("provider") or DEFAULT_PROVIDER)
+        if configured_provider not in PROVIDERS:
+            configured_provider = DEFAULT_PROVIDER
+        stored_keys = self.config.get("api_keys")
+        self.provider_keys = dict(stored_keys) if isinstance(stored_keys, dict) else {}
+        # 自动迁移旧版单个 DeepSeek Key 配置。
+        legacy_key = str(self.config.get("api_key") or "").strip()
+        if legacy_key and not self.provider_keys.get("deepseek"):
+            self.provider_keys["deepseek"] = legacy_key
+        stored_models = self.config.get("models")
+        self.provider_models = dict(stored_models) if isinstance(stored_models, dict) else {}
+        self.current_provider = configured_provider
+        self.provider_var = tk.StringVar(value=provider_label(configured_provider))
+        self.api_key_var = tk.StringVar(
+            value=str(self.provider_keys.get(configured_provider, ""))
+        )
+        self.model_var = tk.StringVar(
+            value=str(
+                self.provider_models.get(configured_provider)
+                or provider_default_model(configured_provider)
+            )
+        )
         saved_prompt = self.config.get("prompt_template") or ""
         # 旧版示例提示词要求 Markdown 标题/表格，微信群中无法正常渲染。
         # 仅迁移这一类旧模板；用户之后保存的新自定义模板仍会原样保留。
@@ -73,8 +97,6 @@ class WeChatSummaryApp:
             else saved_prompt
         )
         self._manual_user_dir = None   # 用户手动指定的微信数据目录
-        # 是否当前使用内置key（True=内置，False=用户自己的）
-        self._using_builtin = not bool(self.config.get("api_key", "").strip())
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -187,34 +209,43 @@ class WeChatSummaryApp:
                                    command=self._on_save, state="disabled", width=16)
         self.btn_save.pack(side="left", padx=6)
 
-        # ── API Key ──
-        api_frame = ttk.LabelFrame(self.root, text="DeepSeek API Key")
-        api_frame.pack(fill="x", **pad)
+        # ── AI 服务 ──
+        self.api_frame = ttk.LabelFrame(self.root, text="第四步：选择 AI 服务")
+        self.api_frame.pack(fill="x", **pad)
 
-        api_row = ttk.Frame(api_frame)
-        api_row.pack(fill="x", padx=8, pady=6)
+        provider_row = ttk.Frame(self.api_frame)
+        provider_row.pack(fill="x", padx=8, pady=(6, 3))
+        ttk.Label(provider_row, text="服务商：").pack(side="left")
+        self.provider_combo = ttk.Combobox(
+            provider_row,
+            textvariable=self.provider_var,
+            values=[provider_label(key) for key in PROVIDERS],
+            state="readonly",
+            width=23,
+        )
+        self.provider_combo.pack(side="left", padx=(4, 14))
+        self.provider_combo.bind("<<ComboboxSelected>>", self._on_provider_changed)
+        ttk.Label(provider_row, text="模型：").pack(side="left")
+        self.model_entry = ttk.Entry(provider_row, textvariable=self.model_var)
+        self.model_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
-        # 内置key时字段预填（掩码显示），用户自己的key直接用
-        initial_key = self.config.get("api_key", "").strip() or DEFAULT_API_KEY
-        self.api_key_var = tk.StringVar(value=initial_key)
-        self.api_entry = ttk.Entry(api_row, textvariable=self.api_key_var,
-                                   show="*", width=48)
-        self.api_entry.pack(side="left")
-
-        # 内置key时「显示」不可用，防止别人看到key内容
-        show_state = "disabled" if self._using_builtin else "normal"
-        self.show_key_btn = ttk.Button(api_row, text="显示", width=5,
-                                       state=show_state,
-                                       command=self._toggle_key_visibility)
-        self.show_key_btn.pack(side="left", padx=(4, 0))
-
-        self.key_hint_label = ttk.Label(api_row,
-            text="  （内置Key，可清空后粘贴自己的）" if self._using_builtin else "  （自定义Key）",
-            foreground="gray")
-        self.key_hint_label.pack(side="left")
-
-        # 监听字段变化：用户修改后切换到自定义模式
-        self.api_key_var.trace_add("write", self._on_api_key_changed)
+        api_row = ttk.Frame(self.api_frame)
+        api_row.pack(fill="x", padx=8, pady=(3, 2))
+        ttk.Label(api_row, text="API Key：").pack(side="left")
+        self.api_entry = ttk.Entry(
+            api_row, textvariable=self.api_key_var, show="*"
+        )
+        self.api_entry.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        self.show_key_btn = ttk.Button(
+            api_row, text="显示", width=5, command=self._toggle_key_visibility
+        )
+        self.show_key_btn.pack(side="left")
+        self.key_hint_label = ttk.Label(
+            self.api_frame,
+            text="Key 只保存在本机 config.json；NVIDIA 免费额度和可用性以模型页为准。",
+            foreground="gray",
+        )
+        self.key_hint_label.pack(anchor="w", padx=8, pady=(2, 6))
 
         # ── 状态栏 ──
         self.status_var = tk.StringVar(value="就绪，请先点击「初始化」")
@@ -240,10 +271,37 @@ class WeChatSummaryApp:
         def _do():
             self.btn_init.config(state=state)
             self.btn_manual.config(state=state)
-            if enabled and self._initialized:
-                self.btn_summarize.config(state="normal")
-                self.chatroom_combo.config(state="readonly")
+            self.btn_summarize.config(
+                state="normal" if enabled and self._initialized else "disabled"
+            )
+            self.chatroom_combo.config(
+                state="readonly" if enabled and self._initialized else "disabled"
+            )
+            self.provider_combo.config(state="readonly" if enabled else "disabled")
+            self.model_entry.config(state=state)
+            self.api_entry.config(state=state)
+            self.show_key_btn.config(state=state)
         self.root.after(0, _do)
+
+    def _provider_key_from_label(self, label):
+        for key, config in PROVIDERS.items():
+            if config["label"] == label:
+                return key
+        return DEFAULT_PROVIDER
+
+    def _remember_provider_settings(self):
+        self.provider_keys[self.current_provider] = self.api_key_var.get().strip()
+        self.provider_models[self.current_provider] = self.model_var.get().strip()
+
+    def _on_provider_changed(self, _event=None):
+        self._remember_provider_settings()
+        selected = self._provider_key_from_label(self.provider_var.get())
+        self.current_provider = selected
+        self.api_key_var.set(str(self.provider_keys.get(selected, "")))
+        self.model_var.set(
+            str(self.provider_models.get(selected) or provider_default_model(selected))
+        )
+        self._set_status(f"已切换到 {provider_label(selected)}")
 
     def _on_manual_select(self):
         """让用户手动选择微信数据文件夹（wxid_xxx 或 xwechat_files）"""
@@ -298,15 +356,6 @@ class WeChatSummaryApp:
         else:
             self.api_entry.config(show="*")
             self.show_key_btn.config(text="显示")
-
-    def _on_api_key_changed(self, *args):
-        """用户修改了Key字段：切换到自定义模式，启用「显示」按钮"""
-        current = self.api_key_var.get()
-        if self._using_builtin and current != DEFAULT_API_KEY:
-            # 用户开始编辑，脱离内置key模式
-            self._using_builtin = False
-            self.show_key_btn.config(state="normal")
-            self.key_hint_label.config(text="  （自定义Key）")
 
     def _display_result(self, text: str):
         self.result_text.config(state="normal")
@@ -517,6 +566,18 @@ class WeChatSummaryApp:
         start_d = self.start_date.get_date()
         end_d = self.end_date.get_date()
         idx = self.chatroom_combo.current()
+        self._remember_provider_settings()
+        provider = self.current_provider
+        api_key = str(self.provider_keys.get(provider) or "").strip()
+        model = str(self.provider_models.get(provider) or "").strip()
+        if not api_key:
+            messagebox.showwarning(
+                "提示", f"请先填写 {provider_label(provider)} API Key。"
+            )
+            return
+        if not model:
+            messagebox.showwarning("提示", "请先填写模型名。")
+            return
 
         self._set_ui_enabled(False)
         self._set_progress(True)
@@ -524,9 +585,10 @@ class WeChatSummaryApp:
         self.msg_count_label.config(text="")
         self._set_status("正在读取消息...")
         threading.Thread(target=self._summarize_thread,
-                         args=(idx, start_d, end_d), daemon=True).start()
+                         args=(idx, start_d, end_d, provider, api_key, model),
+                         daemon=True).start()
 
-    def _summarize_thread(self, idx, start_d, end_d):
+    def _summarize_thread(self, idx, start_d, end_d, provider, api_key, model):
         try:
             # 找选中的群
             if idx < 0 or idx >= len(self.chatrooms):
@@ -559,13 +621,13 @@ class WeChatSummaryApp:
             self._set_status(f"找到 {n} 条消息，正在 AI 总结...")
 
             # AI 总结
-            api_key = self.api_key_var.get().strip() or DEFAULT_API_KEY
             days_approx = (end_d - start_d).days + 1
             group_name = display.split("（")[0].strip()
             summary = ai_summarize(messages, api_key,
                                    group_id=chatroom_id, days=days_approx,
                                    prompt_template=self._prompt_template,
-                                   progress_callback=self._set_status)
+                                   progress_callback=self._set_status,
+                                   provider=provider, model=model)
 
             # 加上日期标题
             header = (f"群聊：{group_name}\n"
@@ -664,16 +726,12 @@ class WeChatSummaryApp:
         ttk.Button(btn_row, text="取消", command=win.destroy, width=10).pack(side="left", padx=6)
 
     def _on_close(self):
+        self._remember_provider_settings()
         cfg = self.config.copy()
-        if self._using_builtin:
-            # 用的是内置key，不保存到config（别人拿到config.json也看不到）
-            cfg.pop("api_key", None)
-        else:
-            key = self.api_key_var.get().strip()
-            if key:
-                cfg["api_key"] = key
-            else:
-                cfg.pop("api_key", None)
+        cfg.pop("api_key", None)
+        cfg["provider"] = self.current_provider
+        cfg["api_keys"] = self.provider_keys
+        cfg["models"] = self.provider_models
         # 保存自定义提示词（若与默认不同）
         if self._prompt_template != DEFAULT_PROMPT_TEMPLATE:
             cfg["prompt_template"] = self._prompt_template

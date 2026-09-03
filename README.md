@@ -10,7 +10,8 @@
 - **选择群聊和时间范围**：支持任意群聊，自由选择开始和结束日期
 - **跨分库读取**：自动合并 `message_0.db`、`message_1.db` 等全部消息分片，近期与历史消息不会漏读
 - **准确识别发言人**：通过消息表的发送者 ID 与联系人数据库匹配备注名/昵称，避免把被提及者误认为发言人
-- **AI 智能总结**：调用 DeepSeek API，生成结构化的群聊摘要
+- **AI 智能总结**：支持 DeepSeek 官方 API 和 NVIDIA API Catalog，生成结构化的群聊摘要
+- **免费模型接入**：可使用 NVIDIA 原型阶段免费端点，并自由修改模型名
 - **长记录不截断**：聊天内容自动分段提炼并汇总，避免只总结最后一部分
 - **微信纯文本排版**：默认使用 emoji 和纯文本小标题，复制进微信群无需再整理 Markdown
 - **自动管理临时空间**：系统盘空间不足时自动改用程序所在盘存放解密临时文件，退出时清理
@@ -24,7 +25,7 @@
 - Windows 系统（仅支持 Windows）
 - 微信电脑版 4.0 / 4.1 已安装并**保持登录状态**（已适配 4.1 新密钥结构）
 - Python 3.8 或以上版本
-- 拥有 [DeepSeek API Key](https://platform.deepseek.com/)（免费注册，按量付费，价格极低）
+- 拥有 [DeepSeek API Key](https://platform.deepseek.com/) 或 [NVIDIA API Catalog](https://build.nvidia.com/) API Key
 
 ---
 
@@ -51,12 +52,20 @@ pip install tkcalendar pycryptodome requests psutil
 
 ## 使用方法
 
-### 第一步：填写 API Key
+### 第一步：选择 AI 服务并填写 API Key
 
-打开 `wechat_gui.py`（或双击运行后在界面底部找到），在 **DeepSeek API Key** 输入框中填入你的 Key。
+打开 `wechat_gui.py`，在界面底部选择 **DeepSeek 官方** 或 **NVIDIA API Catalog**，然后填入对应 Key。两套 Key 分开保存，切换服务商时会自动切换。
 
 > 在 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 注册后即可获取 API Key，格式为 `sk-xxxxxxxx`。
 > 本地 Key 会保存在 `config.json` 中；该文件已加入 `.gitignore`，请勿提交或分享。仓库中的 `config.example.json` 仅作格式示例。
+
+#### NVIDIA 免费接口
+
+1. 登录 [NVIDIA API Catalog](https://build.nvidia.com/)，打开带 **Free Endpoint** 的文本模型。
+2. 点击模型页的 **Generate API Key**。
+3. 在工具中选择“NVIDIA API Catalog”并粘贴 Key。
+
+默认模型为截图中的 `deepseek-ai/deepseek-v4-pro-0813`。模型名可以直接编辑；如果 NVIDIA 返回模型不存在，请从当前模型页复制最新的 `model` 值。免费模型、频率、额度和可用性可能变化，以 NVIDIA 页面当时显示为准。
 
 ### 第二步：运行工具
 
@@ -96,7 +105,7 @@ python wechat_gui.py
 | 第二步：选择群聊 | 从下拉框选择要总结的群 |
 | 第三步：时间范围 | 选择起止日期 |
 | 生成总结 | 调用 AI 生成摘要 |
-| DeepSeek API Key | 填写你自己的 Key（每次启动自动保存） |
+| 第四步：AI 服务 | 选择 DeepSeek 或 NVIDIA，填写 Key 和可编辑的模型名 |
 
 ---
 
@@ -110,10 +119,13 @@ A：新版已兼容微信 4.1 的 `Config.Cipher` 密钥结构。请确保微信
 A：点击「手动选择文件夹」。在微信电脑版 → 设置 → 文件管理，找到"微信文件的存储位置"，进入该目录，选中形如 `wxid_xxxxxxxx` 的文件夹。
 
 **Q：API Key 从哪里获取？**  
-A：前往 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys)，注册账号后在"API Keys"页面创建即可。费用极低，总结一次群聊通常不超过几分钱。
+A：DeepSeek Key 在 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 创建；NVIDIA Key 在 [NVIDIA API Catalog](https://build.nvidia.com/) 的模型页点击“Generate API Key”创建。
+
+**Q：DeepSeek 提示 402 余额不足怎么办？**
+A：可以充值，或在界面中直接切换到 NVIDIA API Catalog。工具会对 401、402、403、404、429 等常见错误给出中文提示。
 
 **Q：API Key 会泄露吗？**  
-A：Key 只保存在你本机且已被 Git 忽略的 `config.json` 中，不会上传到本项目仓库；生成总结时，程序会将其作为身份凭证发送给 DeepSeek API。
+A：Key 只明文保存在你本机且已被 Git 忽略的 `config.json` 中，不会上传到本项目仓库；生成总结时，程序会将当前 Key 作为身份凭证发送给你选择的 API。
 
 **Q：支持个人聊天（非群聊）吗？**  
 A：暂不支持，目前只能总结群聊记录。
@@ -123,7 +135,7 @@ A：暂不支持，目前只能总结群聊记录。
 ## 注意事项
 
 - 本工具通过读取本地微信数据库工作，**不会登录你的微信账号**，也不会发送任何消息
-- 生成 AI 总结时，所选时间范围内的文本消息会发送给 DeepSeek API，请确认群成员同意并遵守当地隐私法规
+- 生成 AI 总结时，所选时间范围内的文本消息会发送给你选择的 DeepSeek 或 NVIDIA API，请确认群成员同意并遵守当地隐私法规
 - 仅支持 Windows 微信 4.0 / 4.1 版本；微信后续若再次调整内部数据库结构，可能需要同步升级提取器
 - 请勿将本工具用于非法用途
 
@@ -135,7 +147,7 @@ A：暂不支持，目前只能总结群聊记录。
 |----|------|
 | tkcalendar | 日期选择控件 |
 | pycryptodome | 解密微信数据库 |
-| requests | 调用 DeepSeek API |
+| requests | 调用 DeepSeek / NVIDIA API |
 | psutil | 自动定位微信数据目录 |
 
 ---

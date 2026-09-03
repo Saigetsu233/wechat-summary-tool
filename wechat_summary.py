@@ -47,6 +47,19 @@ CONFIG_CIPHER_MAX_BLOB = 1024
 MAX_USER_ADDRESS = 0x0000800000000000
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+DEFAULT_PROVIDER = "deepseek"
+PROVIDERS = {
+    "deepseek": {
+        "label": "DeepSeek 官方",
+        "endpoint": "https://api.deepseek.com/v1/chat/completions",
+        "default_model": "deepseek-chat",
+    },
+    "nvidia": {
+        "label": "NVIDIA API Catalog",
+        "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "default_model": "deepseek-ai/deepseek-v4-pro-0813",
+    },
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. 查找微信数据目录
@@ -1094,13 +1107,34 @@ def _notify_summary_progress(callback, message):
             pass
 
 
-def _deepseek_chat(api_key, prompt, max_tokens=2000):
+def provider_label(provider):
+    config = PROVIDERS.get(provider)
+    return str(config["label"]) if config else provider
+
+
+def provider_default_model(provider):
+    config = PROVIDERS.get(provider)
+    if not config:
+        raise ValueError(f"不支持的 AI 服务商：{provider}")
+    return str(config["default_model"])
+
+
+def _chat_completion(api_key, prompt, max_tokens=2000,
+                     provider=DEFAULT_PROVIDER, model=None):
+    provider_config = PROVIDERS.get(provider)
+    if not provider_config:
+        raise ValueError(f"不支持的 AI 服务商：{provider}")
+    label = str(provider_config["label"])
+    clean_key = str(api_key or "").strip()
+    if not clean_key:
+        raise ValueError(f"请先填写 {label} API Key。")
+    selected_model = str(model or "").strip() or str(provider_config["default_model"])
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {clean_key}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": "deepseek-chat",
+        "model": selected_model,
         "messages": [
             {
                 "role": "system",
@@ -1111,14 +1145,56 @@ def _deepseek_chat(api_key, prompt, max_tokens=2000):
         "temperature": 0.3,
         "max_tokens": max_tokens,
     }
-    response = requests.post(
-        "https://api.deepseek.com/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=90,
+    try:
+        response = requests.post(
+            str(provider_config["endpoint"]),
+            headers=headers,
+            json=payload,
+            timeout=90,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"连接 {label} API 失败：{exc}") from exc
+
+    if provider == "nvidia":
+        error_messages = {
+            400: "NVIDIA 请求格式错误，请检查模型名是否正确。",
+            401: "NVIDIA API Key 无效，请在 API Catalog 重新生成并完整复制。",
+            402: "NVIDIA API 免费额度或试用权益不可用，请检查账号状态。",
+            403: "NVIDIA 拒绝了请求，当前 Key 可能没有该模型的访问权限。",
+            404: "NVIDIA 没有找到该模型，请从模型页重新复制模型名。",
+            422: "NVIDIA 不接受当前请求参数，请检查模型名。",
+            429: "NVIDIA 免费接口达到频率或额度限制，请稍后再试。",
+            500: "NVIDIA 服务暂时异常，请稍后再试。",
+            503: "NVIDIA 当前繁忙，请稍后再试。",
+        }
+    else:
+        error_messages = {
+            400: "DeepSeek 请求格式错误，请检查模型名。",
+            401: "DeepSeek API Key 无效，请检查是否复制完整。",
+            402: "DeepSeek API 余额不足，请充值或切换到 NVIDIA API Catalog。",
+            422: "DeepSeek 不接受当前请求参数，请检查模型名。",
+            429: "DeepSeek 请求过于频繁，请稍后再试。",
+            500: "DeepSeek 服务暂时异常，请稍后再试。",
+            503: "DeepSeek 当前繁忙，请稍后再试。",
+        }
+    if response.status_code in error_messages:
+        raise RuntimeError(error_messages[response.status_code])
+
+    try:
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("响应中没有文本内容")
+        return content
+    except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label} 返回了无法识别的响应：{exc}") from exc
+
+
+def _deepseek_chat(api_key, prompt, max_tokens=2000):
+    """向后兼容的 DeepSeek 调用入口。"""
+    return _chat_completion(
+        api_key, prompt, max_tokens=max_tokens, provider="deepseek"
     )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
 
 
 def _markdown_table_to_plain_text(lines):
@@ -1189,8 +1265,8 @@ def to_wechat_plain_text(text):
 
 
 def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
-                 progress_callback=None):
-    """调用 DeepSeek；长记录自动分段提炼后再合并，不截断前文。"""
+                 progress_callback=None, provider=DEFAULT_PROVIDER, model=None):
+    """调用选定的 AI 服务；长记录自动分段提炼后再合并。"""
     if not messages:
         return "该时间段内没有消息。"
 
@@ -1209,14 +1285,19 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
     try:
         chunks = _split_summary_chunks(messages)
         if len(chunks) == 1:
-            _notify_summary_progress(progress_callback, "正在生成 AI 总结...")
+            _notify_summary_progress(
+                progress_callback,
+                f"正在通过 {provider_label(provider)} 生成 AI 总结...",
+            )
             prompt = template.format(
                 date=date_str,
                 day_range=day_str,
                 count=len(messages),
                 messages=chunks[0],
             )
-            return to_wechat_plain_text(_deepseek_chat(api_key, prompt))
+            return to_wechat_plain_text(
+                _chat_completion(api_key, prompt, provider=provider, model=model)
+            )
 
         partial_summaries = []
         total_chunks = len(chunks)
@@ -1235,7 +1316,13 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
 涉及个人观点或趣味事件时保留真实发送者，禁止把被提及者误当成发言人；证据不足则不要署名。
 忽略寒暄与无意义闲聊，保留具体事实，输出简洁的中文要点。"""
             partial_summaries.append(
-                _deepseek_chat(api_key, partial_prompt, max_tokens=1400)
+                _chat_completion(
+                    api_key,
+                    partial_prompt,
+                    max_tokens=1400,
+                    provider=provider,
+                    model=model,
+                )
             )
 
         # 分段摘要仍过长时继续分层压缩，直到能安全放入最终请求。
@@ -1258,7 +1345,13 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
 
 {group}"""
                 reduced.append(
-                    _deepseek_chat(api_key, reduce_prompt, max_tokens=1400)
+                    _chat_completion(
+                        api_key,
+                        reduce_prompt,
+                        max_tokens=1400,
+                        provider=provider,
+                        model=model,
+                    )
                 )
             partial_summaries = reduced
             reduce_round += 1
@@ -1274,7 +1367,11 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
             count=len(messages),
             messages=merged_source,
         )
-        return to_wechat_plain_text(_deepseek_chat(api_key, final_prompt))
+        return to_wechat_plain_text(
+            _chat_completion(
+                api_key, final_prompt, provider=provider, model=model
+            )
+        )
     except Exception as e:
         return f"AI总结失败：{e}"
 
@@ -1328,9 +1425,22 @@ def main():
     install_deps()
     cfg = load_config()
 
-    # ── 获取/确认 API Key ──
-    DEFAULT_API_KEY = ""  # 请填入你自己的 DeepSeek API Key
-    api_key = cfg.get("api_key", "") or DEFAULT_API_KEY
+    # ── 获取/确认 AI 服务配置 ──
+    provider = str(cfg.get("provider") or DEFAULT_PROVIDER)
+    if provider not in PROVIDERS:
+        provider = DEFAULT_PROVIDER
+    api_keys = cfg.get("api_keys") if isinstance(cfg.get("api_keys"), dict) else {}
+    api_key = str(
+        api_keys.get(provider)
+        or (cfg.get("api_key") if provider == "deepseek" else "")
+        or ""
+    ).strip()
+    models = cfg.get("models") if isinstance(cfg.get("models"), dict) else {}
+    model = str(models.get(provider) or provider_default_model(provider)).strip()
+    if not api_key:
+        print(f"❌ 请先在图形界面填写 {provider_label(provider)} API Key。")
+        input("按回车键关闭...")
+        return
 
     # ── 查找微信数据目录 ──
     print("正在查找微信数据目录...")
@@ -1498,7 +1608,14 @@ def main():
     print(f"共找到 {len(messages)} 条文本消息，正在 AI 总结...\n")
 
     # ── AI 总结 ──
-    summary = ai_summarize(messages, api_key, group_id=selected_cr, days=days)
+    summary = ai_summarize(
+        messages,
+        api_key,
+        group_id=selected_cr,
+        days=days,
+        provider=provider,
+        model=model,
+    )
 
     print("=" * 60)
     print(f"  群「{group_name}」AI 总结")
