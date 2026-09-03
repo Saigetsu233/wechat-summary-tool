@@ -67,6 +67,8 @@ pip install tkcalendar pycryptodome requests psutil
 
 默认模型为截图中的 `deepseek-ai/deepseek-v4-pro-0813`。模型名可以直接编辑；如果 NVIDIA 返回模型不存在，请从当前模型页复制最新的 `model` 值。免费模型、频率、额度和可用性可能变化，以 NVIDIA 页面当时显示为准。
 
+NVIDIA 免费端点高负载时可能需要数分钟。工具对 NVIDIA 单次请求最多等待 240 秒；如果读取超时，会在状态栏提示并自动重试一次。
+
 ### 第二步：运行工具
 
 双击 `wechat_gui.py`，或在命令行运行：
@@ -123,6 +125,9 @@ A：DeepSeek Key 在 [DeepSeek 开放平台](https://platform.deepseek.com/api_k
 
 **Q：DeepSeek 提示 402 余额不足怎么办？**
 A：可以充值，或在界面中直接切换到 NVIDIA API Catalog。工具会对 401、402、403、404、429 等常见错误给出中文提示。
+
+**Q：NVIDIA 提示 `Read timed out`怎么办？**
+A：这表示已经连上 NVIDIA，但模型在等待时间内没有返回完整结果，通常不是 Key 错误。新版会最多等待 240 秒并自动重试一次；仍失败时请稍后再试，或换用其他 Free Endpoint 模型。
 
 **Q：API Key 会泄露吗？**  
 A：Key 只明文保存在你本机且已被 Git 忽略的 `config.json` 中，不会上传到本项目仓库；生成总结时，程序会将当前 Key 作为身份凭证发送给你选择的 API。

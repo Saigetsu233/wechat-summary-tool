@@ -24,6 +24,7 @@ import datetime
 import json
 import requests
 import subprocess
+import time
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 常量
@@ -60,6 +61,10 @@ PROVIDERS = {
         "default_model": "deepseek-ai/deepseek-v4-pro-0813",
     },
 }
+DEEPSEEK_REQUEST_TIMEOUT = (15, 90)
+NVIDIA_REQUEST_TIMEOUT = (20, 240)
+NVIDIA_MAX_ATTEMPTS = 2
+NVIDIA_RETRY_DELAY_SECONDS = 2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. 查找微信数据目录
@@ -1120,7 +1125,7 @@ def provider_default_model(provider):
 
 
 def _chat_completion(api_key, prompt, max_tokens=2000,
-                     provider=DEFAULT_PROVIDER, model=None):
+                     provider=DEFAULT_PROVIDER, model=None, retry_callback=None):
     provider_config = PROVIDERS.get(provider)
     if not provider_config:
         raise ValueError(f"不支持的 AI 服务商：{provider}")
@@ -1145,15 +1150,44 @@ def _chat_completion(api_key, prompt, max_tokens=2000,
         "temperature": 0.3,
         "max_tokens": max_tokens,
     }
-    try:
-        response = requests.post(
-            str(provider_config["endpoint"]),
-            headers=headers,
-            json=payload,
-            timeout=90,
-        )
-    except requests.RequestException as exc:
-        raise RuntimeError(f"连接 {label} API 失败：{exc}") from exc
+    timeout = (
+        NVIDIA_REQUEST_TIMEOUT if provider == "nvidia"
+        else DEEPSEEK_REQUEST_TIMEOUT
+    )
+    attempts = NVIDIA_MAX_ATTEMPTS if provider == "nvidia" else 1
+    response = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(
+                str(provider_config["endpoint"]),
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+            )
+            break
+        except requests.ReadTimeout as exc:
+            if provider != "nvidia":
+                raise RuntimeError(
+                    "DeepSeek API 等待超过 90 秒，请检查网络后重试。"
+                ) from exc
+            if attempt < attempts:
+                _notify_summary_progress(
+                    retry_callback,
+                    f"NVIDIA 免费端点等待超时，正在自动重试 "
+                    f"{attempt}/{attempts - 1}...",
+                )
+                time.sleep(NVIDIA_RETRY_DELAY_SECONDS)
+                continue
+            raise RuntimeError(
+                "NVIDIA 免费端点连续两次等待超过 240 秒。"
+                "这通常是模型高负载，不是 API Key 错误；"
+                "请稍后重试或换一个 Free Endpoint 模型。"
+            ) from exc
+        except requests.RequestException as exc:
+            raise RuntimeError(f"连接 {label} API 失败：{exc}") from exc
+
+    if response is None:
+        raise RuntimeError(f"连接 {label} API 失败：未收到响应。")
 
     if provider == "nvidia":
         error_messages = {
@@ -1280,7 +1314,10 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
             date=date_str, day_range=day_str, count=len(messages), messages=""
         )
     except KeyError as e:
-        return f"提示词模板格式错误，未知占位符：{e}\n请在「修改提示词」中检查模板。"
+        raise ValueError(
+            f"提示词模板格式错误，未知占位符：{e}\n"
+            "请在「修改提示词」中检查模板。"
+        ) from e
 
     try:
         chunks = _split_summary_chunks(messages)
@@ -1296,7 +1333,13 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                 messages=chunks[0],
             )
             return to_wechat_plain_text(
-                _chat_completion(api_key, prompt, provider=provider, model=model)
+                _chat_completion(
+                    api_key,
+                    prompt,
+                    provider=provider,
+                    model=model,
+                    retry_callback=progress_callback,
+                )
             )
 
         partial_summaries = []
@@ -1322,6 +1365,7 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                     max_tokens=1400,
                     provider=provider,
                     model=model,
+                    retry_callback=progress_callback,
                 )
             )
 
@@ -1351,6 +1395,7 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                         max_tokens=1400,
                         provider=provider,
                         model=model,
+                        retry_callback=progress_callback,
                     )
                 )
             partial_summaries = reduced
@@ -1369,11 +1414,15 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
         )
         return to_wechat_plain_text(
             _chat_completion(
-                api_key, final_prompt, provider=provider, model=model
+                api_key,
+                final_prompt,
+                provider=provider,
+                model=model,
+                retry_callback=progress_callback,
             )
         )
     except Exception as e:
-        return f"AI总结失败：{e}"
+        raise RuntimeError(f"AI总结失败：{e}") from e
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1608,14 +1657,19 @@ def main():
     print(f"共找到 {len(messages)} 条文本消息，正在 AI 总结...\n")
 
     # ── AI 总结 ──
-    summary = ai_summarize(
-        messages,
-        api_key,
-        group_id=selected_cr,
-        days=days,
-        provider=provider,
-        model=model,
-    )
+    try:
+        summary = ai_summarize(
+            messages,
+            api_key,
+            group_id=selected_cr,
+            days=days,
+            provider=provider,
+            model=model,
+        )
+    except Exception as exc:
+        print(f"❌ {exc}")
+        input("按回车键关闭...")
+        return
 
     print("=" * 60)
     print(f"  群「{group_name}」AI 总结")
