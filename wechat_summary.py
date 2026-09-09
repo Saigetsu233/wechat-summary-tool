@@ -1054,7 +1054,7 @@ DEFAULT_PROMPT_TEMPLATE = """\
 用一段话概括当天群聊的整体氛围和主要内容，可以穿插 1～2 个贴合语境的 emoji 或一句简短吐槽。
 
 🔥 核心议题
-选出 3～6 个主要话题，使用“1️⃣ 话题名称”“2️⃣ 话题名称”的形式编号。
+选出 5～10 个主要话题，使用“1️⃣ 话题名称”“2️⃣ 话题名称”的形式编号；内容不足时不要硬凑。
 有剧情发展的事情按“起因、发展、群友讨论、当前结果”写清楚；没有完整故事线的话题自然概括，不要硬凑四个阶段。
 每个话题可以搭配 1 个贴合内容的 emoji，并在合适的位置加入一句表情包式短评，例如“（这合理吗.jpg）”“（懂得都懂👀）”“主打一个稳中带皮😂”；不要机械套用示例。
 
@@ -1062,7 +1062,7 @@ DEFAULT_PROMPT_TEMPLATE = """\
 直接写“昵称｜一句有节目效果的称号”，下一行说明当选原因。必须根据该昵称作为“发送者”的实际发言判断，不能因为他被别人频繁提到就把别人的话算到他头上。
 
 🏆 趣味成就
-给不同群友颁发 5～8 个搞笑成就，每项严格使用下面的纯文本形式：
+给不同群友颁发 5～10 个搞笑成就，内容不足时宁缺毋滥。每项严格使用下面的纯文本形式：
 ① 成就名称｜昵称
 理由：一句简短、有梗但不恶意的说明，可以加一个贴合该成就的 emoji
 
@@ -1446,7 +1446,7 @@ NEWSPAPER_DIGEST_PROMPT = """\
   "headline": "12～24个字的头版标题",
   "lead": "60～100个字的今日导语",
   "topics": [
-    {{"title": "话题短标题", "summary": "60～100字，说清起因、讨论或结果"}}
+    {{"title": "话题短标题", "summary": "40～80字，说清起因、讨论或结果", "visual_prompt": "对应话题的简短英文插画描述"}}
   ],
   "mvp": {{"name": "昵称", "title": "有趣但不冒犯的称号", "reason": "40～70字理由"}},
   "achievements": [
@@ -1456,11 +1456,12 @@ NEWSPAPER_DIGEST_PROMPT = """\
 }}
 
 要求：
-1. topics 只选 3 个最重要的话题，achievements 只选 3 个。
+1. topics 选 5～10 个重要话题，achievements 选 5～10 个；内容不足时宁缺毋滥。
 2. 宁可少写也不要把字挤得过密，所有字段都要简短。
 3. 只能使用来源总结中已有的事实和发言人，不得杜撰。
 4. 不使用 emoji、网络链接或换行符，保持报纸杂志语气。
 5. 如果金句或 MVP 归属不确定，对应 name 使用“群友”，禁止猜测。
+6. visual_prompt 用英文描述一个有明确主体和动作的漫画画面，不含姓名、文字、数字、品牌或标志。
 """
 
 
@@ -1489,14 +1490,18 @@ def _parse_json_object(value):
 def _normalise_newspaper_digest(data, group_name, date_range, message_count):
     topics = data.get("topics") if isinstance(data.get("topics"), list) else []
     clean_topics = []
-    for item in topics[:3]:
+    for item in topics[:10]:
         if not isinstance(item, dict):
             continue
         title = _short_text(item.get("title"), 18)
         summary = _short_text(item.get("summary"), 120)
         if title or summary:
             clean_topics.append(
-                {"title": title or "今日重点", "summary": summary}
+                {
+                    "title": title or "今日重点",
+                    "summary": summary,
+                    "visual_prompt": _short_text(item.get("visual_prompt"), 140),
+                }
             )
 
     raw_mvp = data.get("mvp") if isinstance(data.get("mvp"), dict) else {}
@@ -1506,7 +1511,7 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
         else []
     )
     achievements = []
-    for item in raw_achievements[:3]:
+    for item in raw_achievements[:10]:
         if not isinstance(item, dict):
             continue
         achievements.append(
@@ -1555,7 +1560,7 @@ def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
         response = _chat_completion(
             api_key,
             prompt,
-            max_tokens=1500,
+            max_tokens=3000,
             provider=provider,
             model=model,
             retry_callback=progress_callback,

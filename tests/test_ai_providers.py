@@ -145,7 +145,14 @@ class AIProviderTests(unittest.TestCase):
             {"title": "雪板选购", "summary": "大家比较了三款雪板。"},
             {"title": "周末行程", "summary": "初步决定周六出发。"},
             {"title": "装备保养", "summary": "群友分享了打蜡经验。"},
-            {"title": "多余话题", "summary": "这条应被裁掉。"}
+            {"title": "第四话题", "summary": "日报现在支持更多重点。"},
+            {"title": "第五话题", "summary": "日报现在支持更多重点。"},
+            {"title": "第六话题", "summary": "日报现在支持更多重点。"},
+            {"title": "第七话题", "summary": "日报现在支持更多重点。"},
+            {"title": "第八话题", "summary": "日报现在支持更多重点。"},
+            {"title": "第九话题", "summary": "日报现在支持更多重点。"},
+            {"title": "第十话题", "summary": "日报现在支持更多重点。"},
+            {"title": "多余话题", "summary": "第十一条应被裁掉。"}
           ],
           "mvp": {"name": "阿雪", "title": "装备参谋", "reason": "整理了对比数据。"},
           "achievements": [
@@ -166,7 +173,7 @@ class AIProviderTests(unittest.TestCase):
 
         self.assertEqual(digest["group_name"], "滑雪群")
         self.assertEqual(digest["message_count"], "564")
-        self.assertEqual(len(digest["topics"]), 3)
+        self.assertEqual(len(digest["topics"]), 10)
         self.assertEqual(digest["mvp"]["name"], "阿雪")
         self.assertEqual(chat.call_args.kwargs["provider"], "nvidia")
 

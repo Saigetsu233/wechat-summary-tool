@@ -50,6 +50,7 @@ from wechat_summary import (
     provider_label,
 )
 from newspaper_renderer import render_newspaper
+from topic_image_generator import generate_topic_images
 
 
 APP_BG = "#F3F5FA"
@@ -89,6 +90,9 @@ class WeChatSummaryApp:
         self._last_summary_text = ""
         self.config = load_config()
         self._initialized = False
+        self.ai_topic_images_var = tk.BooleanVar(
+            value=bool(self.config.get("ai_topic_images", True))
+        )
 
         configured_provider = str(self.config.get("provider") or DEFAULT_PROVIDER)
         if configured_provider not in PROVIDERS:
@@ -301,6 +305,15 @@ class WeChatSummaryApp:
             state="disabled", style="Teal.TButton",
         )
         self.btn_image.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.ai_images_check = ttk.Checkbutton(
+            action_row,
+            text="使用 NVIDIA 图片模型生成话题插画（整页只调用 1 次）",
+            variable=self.ai_topic_images_var,
+            style="Modern.TCheckbutton",
+        )
+        self.ai_images_check.grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
 
         text_shell = tk.Frame(
             right, bg="#FAFBFD", highlightbackground=BORDER,
@@ -379,6 +392,9 @@ class WeChatSummaryApp:
         style.configure("Accent.Horizontal.TProgressbar", background=PRIMARY,
                         troughcolor="#ECEAFB", bordercolor=CARD_BG,
                         lightcolor=PRIMARY, darkcolor=PRIMARY, thickness=5)
+        style.configure("Modern.TCheckbutton", background=CARD_BG, foreground=MUTED,
+                        font=("微软雅黑", 9), padding=(0, 2))
+        style.map("Modern.TCheckbutton", background=[("active", CARD_BG)])
 
     def _card_heading(self, parent, number, title, subtitle):
         row = ttk.Frame(parent, style="Card.TFrame")
@@ -420,6 +436,7 @@ class WeChatSummaryApp:
             self.model_entry.config(state=state)
             self.api_entry.config(state=state)
             self.show_key_btn.config(state=state)
+            self.ai_images_check.config(state=state)
         self.root.after(0, _do)
 
     def _provider_key_from_label(self, label):
@@ -720,7 +737,6 @@ class WeChatSummaryApp:
         if not model:
             messagebox.showwarning("提示", "请先填写模型名。")
             return
-
         self._set_ui_enabled(False)
         self._set_progress(True)
         self._display_result("")
@@ -826,6 +842,15 @@ class WeChatSummaryApp:
         if not model:
             messagebox.showwarning("提示", "请先填写模型名。")
             return
+        use_ai_images = bool(self.ai_topic_images_var.get())
+        image_api_key = str(self.provider_keys.get("nvidia") or "").strip()
+        if use_ai_images and not image_api_key:
+            messagebox.showwarning(
+                "需要 NVIDIA Key",
+                "AI 话题插画使用 NVIDIA 图片模型。请先切换到 NVIDIA API Catalog，"
+                "填写并保存一次 Key；之后使用 DeepSeek 总结时也能复用。",
+            )
+            return
 
         output_path = filedialog.asksaveasfilename(
             defaultextension=".png",
@@ -842,12 +867,13 @@ class WeChatSummaryApp:
         self._set_status("正在读取消息，准备图片日报...")
         threading.Thread(
             target=self._image_thread,
-            args=(idx, start_d, end_d, provider, api_key, model, output_path),
+            args=(idx, start_d, end_d, provider, api_key, model, output_path,
+                  use_ai_images, image_api_key),
             daemon=True,
         ).start()
 
     def _image_thread(self, idx, start_d, end_d, provider, api_key, model,
-                      output_path):
+                      output_path, use_ai_images, image_api_key):
         try:
             if idx < 0 or idx >= len(self.chatrooms):
                 raise ValueError("请选择一个群聊")
@@ -914,8 +940,17 @@ class WeChatSummaryApp:
                 model=model,
                 progress_callback=self._set_status,
             )
-            self._set_status("正在本地排版报纸图片...")
-            rendered_path = render_newspaper(digest, output_path)
+            topic_images = []
+            if use_ai_images:
+                topic_images = generate_topic_images(
+                    digest.get("topics") or [],
+                    image_api_key,
+                    progress_callback=self._set_status,
+                )
+            self._set_status("正在排版长版杂志日报...")
+            rendered_path = render_newspaper(
+                digest, output_path, topic_images=topic_images
+            )
 
             def show_complete():
                 self.msg_count_label.config(text=f"共 {count} 条消息")
@@ -938,15 +973,28 @@ class WeChatSummaryApp:
     def _show_image_preview(self, image_path):
         preview = tk.Toplevel(self.root)
         preview.title("图片日报预览")
-        preview.minsize(520, 680)
+        preview.geometry("760x900")
+        preview.minsize(560, 700)
         with Image.open(image_path) as opened:
             source = opened.copy()
         resampling = getattr(Image, "Resampling", Image)
-        source.thumbnail((660, 820), resampling.LANCZOS)
+        source.thumbnail((700, 1500), resampling.LANCZOS)
         photo = ImageTk.PhotoImage(source)
-        image_label = ttk.Label(preview, image=photo)
-        image_label.image = photo
-        image_label.pack(fill="both", expand=True, padx=12, pady=12)
+
+        viewer = ttk.Frame(preview, padding=(12, 12, 4, 8))
+        viewer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(viewer, bg=APP_BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(viewer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.create_image(0, 0, image=photo, anchor="nw")
+        canvas.image = photo
+        canvas.configure(scrollregion=(0, 0, source.width, source.height))
+        canvas.bind(
+            "<MouseWheel>",
+            lambda event: canvas.yview_scroll(int(-event.delta / 120), "units"),
+        )
         buttons = ttk.Frame(preview)
         buttons.pack(pady=(0, 12))
         ttk.Button(
@@ -1044,6 +1092,7 @@ class WeChatSummaryApp:
         cfg["provider"] = self.current_provider
         cfg["api_keys"] = self.provider_keys
         cfg["models"] = self.provider_models
+        cfg["ai_topic_images"] = bool(self.ai_topic_images_var.get())
         # 保存自定义提示词（若与默认不同）
         if self._prompt_template != DEFAULT_PROMPT_TEMPLATE:
             cfg["prompt_template"] = self._prompt_template
