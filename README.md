@@ -14,7 +14,9 @@
 - **免费模型接入**：可使用 NVIDIA 原型阶段免费端点，并自由修改模型名
 - **长记录不截断**：聊天内容自动分段提炼并汇总，避免只总结最后一部分
 - **微信纯文本排版**：默认使用 emoji 和纯文本小标题，复制进微信群无需再整理 Markdown
-- **单页图片日报**：AI 挑选重点，本地渲染为 `1440×1680` 报纸杂志风 PNG
+- **单页图片日报**：AI 挑选重点，本地渲染为带彩色贴纸和表情插画的 `1440×1680` 杂志风 PNG
+- **现代桌面界面**：卡片式双栏工作台，数据、模型与结果一屏完成
+- **免 Python 运行**：Windows EXE 可直接双击使用
 - **自动管理临时空间**：系统盘空间不足时自动改用程序所在盘存放解密临时文件，退出时清理
 - **自定义提示词**：可修改 AI 的总结风格和格式
 - **结果导出**：支持复制到剪贴板或保存为 TXT 文件
@@ -25,12 +27,15 @@
 
 - Windows 系统（仅支持 Windows）
 - 微信电脑版 4.0 / 4.1 已安装并**保持登录状态**（已适配 4.1 新密钥结构）
-- Python 3.8 或以上版本
 - 拥有 [DeepSeek API Key](https://platform.deepseek.com/) 或 [NVIDIA API Catalog](https://build.nvidia.com/) API Key
 
 ---
 
-## 安装方法
+## 安装方法（推荐）
+
+从项目 Release 下载 `ChatroomDigest.exe`，无需安装 Python，双击即可启动。
+
+## 从源码运行
 
 ### 第一步：安装 Python
 
@@ -55,7 +60,7 @@ pip install -r requirements.txt
 
 ### 第一步：选择 AI 服务并填写 API Key
 
-打开 `wechat_gui.py`，在界面底部选择 **DeepSeek 官方** 或 **NVIDIA API Catalog**，然后填入对应 Key。两套 Key 分开保存，切换服务商时会自动切换。
+打开工具，在左侧选择 **DeepSeek 官方** 或 **NVIDIA API Catalog**，然后填入对应 Key。两套 Key 分开保存，切换服务商时会自动切换。
 
 > 在 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 注册后即可获取 API Key，格式为 `sk-xxxxxxxx`。
 > 本地 Key 会保存在 `config.json` 中；该文件已加入 `.gitignore`，请勿提交或分享。仓库中的 `config.example.json` 仅作格式示例。
@@ -72,7 +77,7 @@ NVIDIA 免费端点高负载时可能需要数分钟。工具对 NVIDIA 单次�
 
 ### 第二步：运行工具
 
-双击 `wechat_gui.py`，或在命令行运行：
+直接双击 `ChatroomDigest.exe`。从源码使用时运行：
 
 ```
 python wechat_gui.py
@@ -102,7 +107,17 @@ python wechat_gui.py
 2. AI 先将聊天压缩为 3 个核心话题、今日 MVP、3 个趣味成就和 1 条金句。
 3. 程序在本地排版成单张 `1440×1680` PNG，完成后自动显示预览。
 
-图片中的文字由程序确定性渲染，不会调用 AI 绘图服务，因此不会出现 AI 图片中常见的中文乱码。如果刚刚已生成同一群、同一日期的文字总结，图片功能会直接复用，避免重复总结。
+图片中的文字、彩色贴纸和表情插画都由程序本地渲染，不会调用 AI 绘图服务，因此不会出现 AI 图片中常见的中文乱码。如果刚刚已生成同一群、同一日期的文字总结，图片功能会直接复用，避免重复总结。
+
+## 自己构建 EXE
+
+在 PowerShell 中运行：
+
+```powershell
+.\build_exe.ps1
+```
+
+脚本会安装构建所需的 PyInstaller，并在 `dist\ChatroomDigest.exe` 生成单文件程序。EXE 版的配置保存在 `%LOCALAPPDATA%\ChatroomDigest\config.json`；首次从本项目的 `dist` 目录运行时，也会读取项目根目录已有的配置。
 
 ---
 

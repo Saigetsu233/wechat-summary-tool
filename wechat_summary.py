@@ -47,7 +47,16 @@ CONFIG_CIPHER_XOR_MASK = bytes.fromhex(
 CONFIG_CIPHER_MAX_BLOB = 1024
 MAX_USER_ADDRESS = 0x0000800000000000
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+if IS_FROZEN:
+    APP_DATA_DIR = os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+        "ChatroomDigest",
+    )
+else:
+    APP_DATA_DIR = SOURCE_DIR
+CONFIG_FILE = os.path.join(APP_DATA_DIR, "config.json")
 DEFAULT_PROVIDER = "deepseek"
 PROVIDERS = {
     "deepseek": {
@@ -637,9 +646,7 @@ def select_decrypt_temp_dir(required_bytes):
     """选择可容纳解密副本的临时目录，系统盘不足时自动改用程序所在盘。"""
     safety_margin = 128 * 1024 * 1024
     system_temp = tempfile.gettempdir()
-    project_temp = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), ".wechat_summary_tmp"
-    )
+    project_temp = os.path.join(APP_DATA_DIR, ".wechat_summary_tmp")
     candidates = [system_temp, project_temp]
     checked = []
     for candidate in dict.fromkeys(candidates):
@@ -1566,16 +1573,28 @@ def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_config():
-    if os.path.exists(CONFIG_FILE):
+    candidates = [CONFIG_FILE]
+    if IS_FROZEN:
+        executable_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.extend(
+            [
+                os.path.join(executable_dir, "config.json"),
+                os.path.join(os.path.dirname(executable_dir), "config.json"),
+            ]
+        )
+    for config_path in dict.fromkeys(candidates):
+        if not os.path.exists(config_path):
+            continue
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            pass
+            continue
     return {}
 
 
 def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 

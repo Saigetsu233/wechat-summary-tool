@@ -51,12 +51,31 @@ from wechat_summary import (
 )
 from newspaper_renderer import render_newspaper
 
+
+APP_BG = "#F3F5FA"
+CARD_BG = "#FFFFFF"
+INK = "#172033"
+MUTED = "#6B7280"
+PRIMARY = "#6C5CE7"
+PRIMARY_DARK = "#5747D6"
+CYAN = "#00A8A8"
+NAVY = "#111827"
+BORDER = "#E4E8F0"
+
+
+def resource_path(filename):
+    """返回源码运行或 PyInstaller 打包后的资源路径。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, filename)
+
+
 class WeChatSummaryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("微信群聊 AI 总结工具")
+        self.root.title("群聊日报 · AI Digest")
         self.root.resizable(True, True)
-        self.root.minsize(700, 780)
+        self.root.minsize(980, 840)
+        self.root.configure(bg=APP_BG)
 
         # 后端状态
         self.key_map = {}
@@ -116,161 +135,259 @@ class WeChatSummaryApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        pad = dict(padx=12, pady=6)
+        self._configure_styles()
 
-        # ── 第一步：初始化 ──
-        frame1 = ttk.LabelFrame(self.root, text="第一步：初始化（需要微信已登录）")
-        frame1.pack(fill="x", **pad)
+        # 顶部品牌区
+        hero = tk.Frame(self.root, bg=NAVY, height=104)
+        hero.pack(fill="x")
+        hero.pack_propagate(False)
+        title_block = tk.Frame(hero, bg=NAVY)
+        title_block.pack(side="left", padx=28, pady=20)
+        tk.Label(
+            title_block, text="GROUP CHAT DIGEST", bg=NAVY, fg="#8B80FF",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            title_block, text="群聊日报", bg=NAVY, fg="white",
+            font=("微软雅黑", 24, "bold"),
+        ).pack(anchor="w", pady=(1, 0))
+        tk.Label(
+            hero, text="把几百条消息，变成一分钟读完的今日头版  ✦",
+            bg=NAVY, fg="#C9D1E3", font=("微软雅黑", 10),
+        ).pack(side="right", padx=30)
 
-        init_row = ttk.Frame(frame1)
-        init_row.pack(fill="x", padx=8, pady=(6, 2))
+        workspace = ttk.Frame(self.root, style="App.TFrame", padding=(20, 18, 20, 14))
+        workspace.pack(fill="both", expand=True)
+        workspace.columnconfigure(0, minsize=340, weight=0)
+        workspace.columnconfigure(1, weight=1)
+        workspace.rowconfigure(0, weight=1)
 
-        self.btn_init = ttk.Button(init_row, text="自动初始化",
-                                   command=self._on_init_click, width=14)
-        self.btn_init.pack(side="left")
+        left = ttk.Frame(workspace, style="App.TFrame")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        right = ttk.Frame(workspace, style="Card.TFrame", padding=20)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(2, weight=1)
 
-        self.btn_manual = ttk.Button(init_row, text="手动选择文件夹",
-                                     command=self._on_manual_select, width=16)
+        # 数据源卡片
+        source_card = ttk.Frame(left, style="Card.TFrame", padding=16)
+        source_card.pack(fill="x", pady=(0, 12))
+        self._card_heading(source_card, "01", "连接微信", "微信保持登录状态")
+        init_row = ttk.Frame(source_card, style="Card.TFrame")
+        init_row.pack(fill="x", pady=(12, 8))
+        self.btn_init = ttk.Button(
+            init_row, text="自动连接", command=self._on_init_click,
+            style="Primary.TButton",
+        )
+        self.btn_init.pack(side="left", fill="x", expand=True)
+        self.btn_manual = ttk.Button(
+            init_row, text="选择目录", command=self._on_manual_select,
+            style="Soft.TButton",
+        )
         self.btn_manual.pack(side="left", padx=(8, 0))
+        self.progress = ttk.Progressbar(
+            source_card, mode="indeterminate", style="Accent.Horizontal.TProgressbar"
+        )
+        self.progress.pack(fill="x", pady=(1, 8))
+        self.path_label = ttk.Label(
+            source_card, text="尚未连接，将自动检测微信数据目录",
+            style="Hint.TLabel", wraplength=300, justify="left",
+        )
+        self.path_label.pack(anchor="w")
 
-        self.progress = ttk.Progressbar(init_row, mode="indeterminate", length=160)
-        self.progress.pack(side="left", padx=(12, 0))
-
-        # 当前数据路径提示
-        path_row = ttk.Frame(frame1)
-        path_row.pack(fill="x", padx=8, pady=(0, 6))
-        self.path_label = ttk.Label(path_row, text="数据目录：（未选择，将自动检测）",
-                                    foreground="gray", wraplength=560, justify="left")
-        self.path_label.pack(side="left")
-
-        # ── 第二步：选择群聊 ──
-        frame2 = ttk.LabelFrame(self.root, text="第二步：选择群聊")
-        frame2.pack(fill="x", **pad)
-
-        chatroom_row = ttk.Frame(frame2)
-        chatroom_row.pack(fill="x", padx=8, pady=6)
-
-        ttk.Label(chatroom_row, text="群聊：").pack(side="left")
+        # 内容范围卡片
+        range_card = ttk.Frame(left, style="Card.TFrame", padding=16)
+        range_card.pack(fill="x", pady=(0, 12))
+        self._card_heading(range_card, "02", "选择内容", "群聊与日期范围")
+        ttk.Label(range_card, text="群聊", style="FieldLabel.TLabel").pack(
+            anchor="w", pady=(12, 5)
+        )
         self.chatroom_var = tk.StringVar()
-        self.chatroom_combo = ttk.Combobox(chatroom_row, textvariable=self.chatroom_var,
-                                           state="disabled", width=50)
-        self.chatroom_combo.pack(side="left", padx=(4, 0), fill="x", expand=True)
+        self.chatroom_combo = ttk.Combobox(
+            range_card, textvariable=self.chatroom_var, state="disabled",
+            style="Modern.TCombobox",
+        )
+        self.chatroom_combo.pack(fill="x")
 
-        # ── 第三步：时间范围 ──
-        frame3 = ttk.LabelFrame(self.root, text="第三步：选择时间范围")
-        frame3.pack(fill="x", **pad)
-
-        date_row = ttk.Frame(frame3)
-        date_row.pack(fill="x", padx=8, pady=6)
-
+        date_row = ttk.Frame(range_card, style="Card.TFrame")
+        date_row.pack(fill="x", pady=(12, 0))
+        date_row.columnconfigure((0, 1), weight=1)
         today = datetime.date.today()
         week_ago = today - datetime.timedelta(days=6)
-
-        ttk.Label(date_row, text="开始日期：").pack(side="left")
-        self.start_date = DateEntry(date_row, locale="zh_CN",
-                                    date_pattern="yyyy-mm-dd",
-                                    year=week_ago.year,
-                                    month=week_ago.month,
-                                    day=week_ago.day,
-                                    width=12)
-        self.start_date.pack(side="left", padx=(4, 16))
-
-        ttk.Label(date_row, text="结束日期：").pack(side="left")
-        self.end_date = DateEntry(date_row, locale="zh_CN",
-                                  date_pattern="yyyy-mm-dd",
-                                  year=today.year,
-                                  month=today.month,
-                                  day=today.day,
-                                  width=12)
-        self.end_date.pack(side="left", padx=(4, 0))
-
-        # ── 生成按钮 ──
-        btn_row = ttk.Frame(self.root)
-        btn_row.pack(fill="x", padx=12, pady=4)
-        self.btn_summarize = ttk.Button(btn_row, text="生成总结",
-                                        command=self._on_summarize_click,
-                                        state="disabled", width=20)
-        self.btn_summarize.pack(side="left")
-
-        self.btn_image = ttk.Button(
-            btn_row,
-            text="生成图片日报",
-            command=self._on_image_click,
-            state="disabled",
-            width=16,
+        ttk.Label(date_row, text="开始日期", style="FieldLabel.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 5)
         )
-        self.btn_image.pack(side="left", padx=(10, 0))
-
-        self.btn_edit_prompt = ttk.Button(btn_row, text="修改提示词",
-                                          command=self._on_edit_prompt, width=12)
-        self.btn_edit_prompt.pack(side="left", padx=(10, 0))
-
-        # 消息数量提示
-        self.msg_count_label = ttk.Label(btn_row, text="", foreground="gray")
-        self.msg_count_label.pack(side="left", padx=(12, 0))
-
-        # ── 总结结果 ──
-        frame4 = ttk.LabelFrame(self.root, text="总结结果")
-        frame4.pack(fill="both", expand=True, **pad)
-
-        self.result_text = scrolledtext.ScrolledText(
-            frame4, wrap="word", state="disabled",
-            font=("微软雅黑", 10), height=14
+        ttk.Label(date_row, text="结束日期", style="FieldLabel.TLabel").grid(
+            row=0, column=1, sticky="w", padx=(5, 0)
         )
-        self.result_text.pack(fill="both", expand=True, padx=8, pady=(6, 4))
+        self.start_date = DateEntry(
+            date_row, locale="zh_CN", date_pattern="yyyy-mm-dd",
+            year=week_ago.year, month=week_ago.month, day=week_ago.day,
+        )
+        self.start_date.grid(row=1, column=0, sticky="ew", padx=(0, 5), pady=(5, 0))
+        self.end_date = DateEntry(
+            date_row, locale="zh_CN", date_pattern="yyyy-mm-dd",
+            year=today.year, month=today.month, day=today.day,
+        )
+        self.end_date.grid(row=1, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
 
-        btn_result_row = ttk.Frame(frame4)
-        btn_result_row.pack(pady=(0, 6))
-        self.btn_copy = ttk.Button(btn_result_row, text="复制到剪贴板",
-                                   command=self._on_copy, state="disabled", width=16)
-        self.btn_copy.pack(side="left", padx=6)
-        self.btn_save = ttk.Button(btn_result_row, text="保存为 TXT",
-                                   command=self._on_save, state="disabled", width=16)
-        self.btn_save.pack(side="left", padx=6)
-
-        # ── AI 服务 ──
-        self.api_frame = ttk.LabelFrame(self.root, text="第四步：选择 AI 服务")
-        self.api_frame.pack(fill="x", **pad)
-
-        provider_row = ttk.Frame(self.api_frame)
-        provider_row.pack(fill="x", padx=8, pady=(6, 3))
-        ttk.Label(provider_row, text="服务商：").pack(side="left")
+        # AI 服务卡片
+        self.api_frame = ttk.Frame(left, style="Card.TFrame", padding=16)
+        self.api_frame.pack(fill="x")
+        self._card_heading(self.api_frame, "03", "AI 引擎", "选择服务与模型")
+        ttk.Label(self.api_frame, text="服务商", style="FieldLabel.TLabel").pack(
+            anchor="w", pady=(12, 5)
+        )
         self.provider_combo = ttk.Combobox(
-            provider_row,
-            textvariable=self.provider_var,
-            values=[provider_label(key) for key in PROVIDERS],
-            state="readonly",
-            width=23,
+            self.api_frame, textvariable=self.provider_var,
+            values=[provider_label(key) for key in PROVIDERS], state="readonly",
+            style="Modern.TCombobox",
         )
-        self.provider_combo.pack(side="left", padx=(4, 14))
+        self.provider_combo.pack(fill="x")
         self.provider_combo.bind("<<ComboboxSelected>>", self._on_provider_changed)
-        ttk.Label(provider_row, text="模型：").pack(side="left")
-        self.model_entry = ttk.Entry(provider_row, textvariable=self.model_var)
-        self.model_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
-
-        api_row = ttk.Frame(self.api_frame)
-        api_row.pack(fill="x", padx=8, pady=(3, 2))
-        ttk.Label(api_row, text="API Key：").pack(side="left")
+        ttk.Label(self.api_frame, text="模型", style="FieldLabel.TLabel").pack(
+            anchor="w", pady=(10, 5)
+        )
+        self.model_entry = ttk.Entry(
+            self.api_frame, textvariable=self.model_var, style="Modern.TEntry"
+        )
+        self.model_entry.pack(fill="x")
+        ttk.Label(self.api_frame, text="API Key", style="FieldLabel.TLabel").pack(
+            anchor="w", pady=(10, 5)
+        )
+        api_row = ttk.Frame(self.api_frame, style="Card.TFrame")
+        api_row.pack(fill="x")
         self.api_entry = ttk.Entry(
-            api_row, textvariable=self.api_key_var, show="*"
+            api_row, textvariable=self.api_key_var, show="*", style="Modern.TEntry"
         )
-        self.api_entry.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        self.api_entry.pack(side="left", fill="x", expand=True)
         self.show_key_btn = ttk.Button(
-            api_row, text="显示", width=5, command=self._toggle_key_visibility
+            api_row, text="显示", command=self._toggle_key_visibility,
+            style="Soft.TButton", width=5,
         )
-        self.show_key_btn.pack(side="left")
+        self.show_key_btn.pack(side="left", padx=(7, 0))
         self.key_hint_label = ttk.Label(
             self.api_frame,
-            text="Key 只保存在本机 config.json；NVIDIA 免费额度和可用性以模型页为准。",
-            foreground="gray",
+            text="Key 仅保存在本机；NVIDIA 免费额度以模型页为准",
+            style="Hint.TLabel", wraplength=300,
         )
-        self.key_hint_label.pack(anchor="w", padx=8, pady=(2, 6))
+        self.key_hint_label.pack(anchor="w", pady=(9, 0))
 
-        # ── 状态栏 ──
-        self.status_var = tk.StringVar(value="就绪，请先点击「初始化」")
-        status_bar = ttk.Label(self.root, textvariable=self.status_var,
-                               relief="sunken", anchor="w")
-        status_bar.pack(fill="x", side="bottom", padx=0, pady=0)
+        # 右侧总结工作区
+        header_row = ttk.Frame(right, style="Card.TFrame")
+        header_row.grid(row=0, column=0, sticky="ew")
+        header_row.columnconfigure(0, weight=1)
+        title_area = ttk.Frame(header_row, style="Card.TFrame")
+        title_area.grid(row=0, column=0, sticky="w")
+        ttk.Label(title_area, text="今日总结", style="PanelTitle.TLabel").pack(anchor="w")
+        self.msg_count_label = ttk.Label(title_area, text="等待选择群聊", style="Hint.TLabel")
+        self.msg_count_label.pack(anchor="w", pady=(3, 0))
+        self.btn_edit_prompt = ttk.Button(
+            header_row, text="调整提示词", command=self._on_edit_prompt,
+            style="Soft.TButton",
+        )
+        self.btn_edit_prompt.grid(row=0, column=1, sticky="e")
+
+        action_row = ttk.Frame(right, style="Card.TFrame")
+        action_row.grid(row=1, column=0, sticky="ew", pady=(18, 14))
+        action_row.columnconfigure((0, 1), weight=1)
+        self.btn_summarize = ttk.Button(
+            action_row, text="✨ 生成文字总结", command=self._on_summarize_click,
+            state="disabled", style="Primary.TButton",
+        )
+        self.btn_summarize.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.btn_image = ttk.Button(
+            action_row, text="📰 生成图片日报", command=self._on_image_click,
+            state="disabled", style="Teal.TButton",
+        )
+        self.btn_image.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        text_shell = tk.Frame(
+            right, bg="#FAFBFD", highlightbackground=BORDER,
+            highlightthickness=1, bd=0,
+        )
+        text_shell.grid(row=2, column=0, sticky="nsew")
+        self.result_text = scrolledtext.ScrolledText(
+            text_shell, wrap="word", state="disabled", bd=0,
+            relief="flat", bg="#FAFBFD", fg=INK, insertbackground=PRIMARY,
+            selectbackground="#DCD8FF", font=("微软雅黑", 10),
+            padx=16, pady=14, spacing1=2, spacing3=5,
+        )
+        self.result_text.pack(fill="both", expand=True)
+
+        btn_result_row = ttk.Frame(right, style="Card.TFrame")
+        btn_result_row.grid(row=3, column=0, sticky="e", pady=(13, 0))
+        self.btn_copy = ttk.Button(
+            btn_result_row, text="复制文字", command=self._on_copy,
+            state="disabled", style="Soft.TButton",
+        )
+        self.btn_copy.pack(side="left", padx=(0, 8))
+        self.btn_save = ttk.Button(
+            btn_result_row, text="保存 TXT", command=self._on_save,
+            state="disabled", style="Soft.TButton",
+        )
+        self.btn_save.pack(side="left")
+
+        self.status_var = tk.StringVar(value="就绪 · 请先连接微信")
+        status_bar = tk.Label(
+            self.root, textvariable=self.status_var, bg="#E9ECF4", fg=MUTED,
+            anchor="w", padx=22, pady=7, font=("微软雅黑", 9),
+        )
+        status_bar.pack(fill="x", side="bottom")
+
+    def _configure_styles(self):
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("App.TFrame", background=APP_BG)
+        style.configure("Card.TFrame", background=CARD_BG)
+        style.configure("TLabel", background=CARD_BG, foreground=INK,
+                        font=("微软雅黑", 9))
+        style.configure("Hint.TLabel", background=CARD_BG, foreground=MUTED,
+                        font=("微软雅黑", 8))
+        style.configure("FieldLabel.TLabel", background=CARD_BG, foreground="#4B5563",
+                        font=("微软雅黑", 9, "bold"))
+        style.configure("PanelTitle.TLabel", background=CARD_BG, foreground=INK,
+                        font=("微软雅黑", 18, "bold"))
+        style.configure("Step.TLabel", background=PRIMARY, foreground="white",
+                        padding=(7, 3), font=("Segoe UI", 8, "bold"))
+        style.configure("CardTitle.TLabel", background=CARD_BG, foreground=INK,
+                        font=("微软雅黑", 12, "bold"))
+        style.configure("Primary.TButton", background=PRIMARY, foreground="white",
+                        borderwidth=0, padding=(14, 10), font=("微软雅黑", 9, "bold"))
+        style.map("Primary.TButton", background=[("active", PRIMARY_DARK),
+                                                  ("disabled", "#C7C2EE")])
+        style.configure("Teal.TButton", background=CYAN, foreground="white",
+                        borderwidth=0, padding=(14, 10), font=("微软雅黑", 9, "bold"))
+        style.map("Teal.TButton", background=[("active", "#008F8F"),
+                                               ("disabled", "#A7D8D8")])
+        style.configure("Soft.TButton", background="#EEF0F6", foreground=INK,
+                        borderwidth=0, padding=(10, 7), font=("微软雅黑", 9))
+        style.map("Soft.TButton", background=[("active", "#E1E4ED")])
+        style.configure("Modern.TEntry", fieldbackground="#F8F9FC",
+                        foreground=INK, bordercolor=BORDER, lightcolor=BORDER,
+                        darkcolor=BORDER, padding=7)
+        style.configure("Modern.TCombobox", fieldbackground="#F8F9FC",
+                        background="#F8F9FC", foreground=INK,
+                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER,
+                        arrowsize=14, padding=6)
+        style.map("Modern.TCombobox", fieldbackground=[("readonly", "#F8F9FC")],
+                  selectbackground=[("readonly", "#F8F9FC")],
+                  selectforeground=[("readonly", INK)])
+        style.configure("Accent.Horizontal.TProgressbar", background=PRIMARY,
+                        troughcolor="#ECEAFB", bordercolor=CARD_BG,
+                        lightcolor=PRIMARY, darkcolor=PRIMARY, thickness=5)
+
+    def _card_heading(self, parent, number, title, subtitle):
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Label(row, text=number, style="Step.TLabel").pack(side="left")
+        text = ttk.Frame(row, style="Card.TFrame")
+        text.pack(side="left", padx=(10, 0))
+        ttk.Label(text, text=title, style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(text, text=subtitle, style="Hint.TLabel").pack(anchor="w")
 
     # ─────────────────────────────────────────────────────────────────────────
     # 工具方法
@@ -942,10 +1059,21 @@ class WeChatSummaryApp:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
     root = tk.Tk()
+    icon_path = resource_path("icon.ico")
+    if os.path.isfile(icon_path):
+        try:
+            root.iconbitmap(icon_path)
+        except tk.TclError:
+            pass
     app = WeChatSummaryApp(root)
 
     # 让窗口居中
+    root.geometry("1120x900")
     root.update_idletasks()
     w, h = root.winfo_width(), root.winfo_height()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
