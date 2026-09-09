@@ -112,13 +112,15 @@ def _extract_image_bytes(response_data):
 
 
 def generate_topic_images(topics, api_key, progress_callback=None,
-                          request_fn=requests.post):
+                          request_fn=requests.post, cancel_event=None):
     """一次生成联系表并裁出最多十二张手绘插画。"""
     selected = [item for item in topics if isinstance(item, dict)][:MAX_TOPIC_IMAGES]
     if not selected:
         return []
     if not str(api_key or "").strip():
         raise ValueError("AI 话题配图需要 NVIDIA API Key。")
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("任务已取消。")
 
     _notify(progress_callback, f"正在让图片模型绘制 {len(selected)} 张话题插画...")
     payload = {
@@ -139,10 +141,10 @@ def generate_topic_images(topics, api_key, progress_callback=None,
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=(20, 300),
+            timeout=(20, 120),
         )
     except requests.Timeout as exc:
-        raise RuntimeError("NVIDIA 图片模型响应超时，请稍后重试。") from exc
+        raise RuntimeError("NVIDIA 图片模型等待超过 120 秒，请稍后重试。") from exc
     except requests.RequestException as exc:
         raise RuntimeError(f"连接 NVIDIA 图片模型失败：{exc}") from exc
 
@@ -154,6 +156,8 @@ def generate_topic_images(topics, api_key, progress_callback=None,
         raise RuntimeError("NVIDIA 图片模型请求过于频繁，请稍后再试。")
     try:
         response.raise_for_status()
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("任务已取消。")
         raw_image = _extract_image_bytes(response.json())
         with Image.open(BytesIO(raw_image)) as opened:
             sheet = opened.convert("RGB")

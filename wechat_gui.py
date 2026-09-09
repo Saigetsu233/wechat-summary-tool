@@ -91,6 +91,7 @@ class WeChatSummaryApp:
         self.contact_name_map = {}
         self._last_summary_key = None
         self._last_summary_text = ""
+        self._cancel_event = threading.Event()
         self.config = load_config()
         self._initialized = False
         self.ai_topic_images_var = tk.BooleanVar(
@@ -315,8 +316,16 @@ class WeChatSummaryApp:
             style="Modern.TCheckbutton",
         )
         self.ai_images_check.grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
+            row=1, column=0, sticky="w", pady=(10, 0)
         )
+        self.btn_cancel = ttk.Button(
+            action_row,
+            text="取消任务",
+            command=self._on_cancel_task,
+            state="disabled",
+            style="Soft.TButton",
+        )
+        self.btn_cancel.grid(row=1, column=1, sticky="e", pady=(10, 0))
 
         text_shell = tk.Frame(
             right, bg="#FAFBFD", highlightbackground=BORDER,
@@ -415,6 +424,22 @@ class WeChatSummaryApp:
     def _set_status(self, msg, color="black"):
         self.root.after(0, lambda: self.status_var.set(msg))
 
+    def _set_image_status(self, count, msg):
+        """让耗时阶段在主面板与底部状态栏同时可见。"""
+        text = str(msg)
+        self._set_status(text)
+        self.root.after(
+            0,
+            lambda value=f"共 {count} 条消息 · {text}": self.msg_count_label.config(
+                text=value
+            ),
+        )
+
+    def _on_cancel_task(self):
+        self._cancel_event.set()
+        self.btn_cancel.config(state="disabled")
+        self._set_status("正在取消任务；当前网络请求结束后立即停止...")
+
     def _set_progress(self, running: bool):
         if running:
             self.root.after(0, self.progress.start)
@@ -440,6 +465,8 @@ class WeChatSummaryApp:
             self.api_entry.config(state=state)
             self.show_key_btn.config(state=state)
             self.ai_images_check.config(state=state)
+            if enabled:
+                self.btn_cancel.config(state="disabled")
         self.root.after(0, _do)
 
     def _provider_key_from_label(self, label):
@@ -864,8 +891,10 @@ class WeChatSummaryApp:
         if not output_path:
             return
 
+        self._cancel_event.clear()
         self._set_ui_enabled(False)
         self._set_progress(True)
+        self.btn_cancel.config(state="normal")
         self.msg_count_label.config(text="")
         self._set_status("正在读取消息，准备图片日报...")
         threading.Thread(
@@ -899,6 +928,7 @@ class WeChatSummaryApp:
                 raise ValueError("该时间段内没有文本消息。")
 
             count = len(messages)
+            report_progress = lambda message: self._set_image_status(count, message)
             cache_key = (
                 chatroom_id,
                 start_ts,
@@ -916,7 +946,7 @@ class WeChatSummaryApp:
             )
             if self._last_summary_key == cache_key and self._last_summary_text:
                 summary = self._last_summary_text
-                self._set_status("正在复用刚才的文字总结...")
+                report_progress("正在复用刚才的文字总结...")
             else:
                 days_approx = (end_d - start_d).days + 1
                 summary = ai_summarize(
@@ -925,9 +955,10 @@ class WeChatSummaryApp:
                     group_id=chatroom_id,
                     days=days_approx,
                     prompt_template=self._prompt_template,
-                    progress_callback=self._set_status,
+                    progress_callback=report_progress,
                     provider=provider,
                     model=model,
+                    cancel_event=self._cancel_event,
                 )
                 self._last_summary_key = cache_key
                 self._last_summary_text = summary
@@ -941,7 +972,8 @@ class WeChatSummaryApp:
                 count,
                 provider=provider,
                 model=model,
-                progress_callback=self._set_status,
+                progress_callback=report_progress,
+                cancel_event=self._cancel_event,
             )
             topic_images = []
             if use_ai_images:
@@ -949,9 +981,12 @@ class WeChatSummaryApp:
                 topic_images = generate_topic_images(
                     illustration_requests,
                     image_api_key,
-                    progress_callback=self._set_status,
+                    progress_callback=report_progress,
+                    cancel_event=self._cancel_event,
                 )
-            self._set_status("正在排版长版杂志日报...")
+            if self._cancel_event.is_set():
+                raise RuntimeError("任务已取消。")
+            report_progress("正在本地排版手绘日报...")
             rendered_path = render_newspaper(
                 digest, output_path, topic_images=topic_images
             )
@@ -964,6 +999,14 @@ class WeChatSummaryApp:
             self.root.after(0, show_complete)
         except Exception as exc:
             error = str(exc)
+
+            if self._cancel_event.is_set():
+                self.root.after(
+                    0,
+                    lambda: self.msg_count_label.config(text="图片日报任务已取消"),
+                )
+                self._set_status("任务已取消。")
+                return
 
             def show_error():
                 messagebox.showerror("图片日报生成失败", error)

@@ -1,6 +1,7 @@
 import base64
 from io import BytesIO
 import unittest
+import threading
 
 from PIL import Image, ImageDraw
 
@@ -86,7 +87,21 @@ class TopicImageGeneratorTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], NVIDIA_IMAGE_ENDPOINT)
         self.assertEqual(calls[0][1]["json"]["height"], 768)
+        self.assertEqual(calls[0][1]["timeout"], (20, 120))
         self.assertEqual(len(images), 2)
+
+    def test_cancelled_image_request_does_not_reach_network(self):
+        cancel_event = threading.Event()
+        cancel_event.set()
+        calls = []
+        with self.assertRaisesRegex(RuntimeError, "任务已取消"):
+            generate_topic_images(
+                [{"title": "雪板"}],
+                "nvapi-test-key",
+                request_fn=lambda *args, **kwargs: calls.append((args, kwargs)),
+                cancel_event=cancel_event,
+            )
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

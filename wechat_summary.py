@@ -24,7 +24,6 @@ import datetime
 import json
 import requests
 import subprocess
-import time
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 常量
@@ -71,9 +70,7 @@ PROVIDERS = {
     },
 }
 DEEPSEEK_REQUEST_TIMEOUT = (15, 90)
-NVIDIA_REQUEST_TIMEOUT = (20, 240)
-NVIDIA_MAX_ATTEMPTS = 2
-NVIDIA_RETRY_DELAY_SECONDS = 2
+NVIDIA_REQUEST_TIMEOUT = (20, 120)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. 查找微信数据目录
@@ -1083,7 +1080,7 @@ DEFAULT_PROMPT_TEMPLATE = """\
 # {messages}  → 聊天记录正文
 
 
-SUMMARY_CHUNK_CHARS = 18000
+SUMMARY_CHUNK_CHARS = 100000
 
 
 def _split_summary_chunks(items, max_chars=SUMMARY_CHUNK_CHARS):
@@ -1132,7 +1129,8 @@ def provider_default_model(provider):
 
 
 def _chat_completion(api_key, prompt, max_tokens=2000,
-                     provider=DEFAULT_PROVIDER, model=None, retry_callback=None):
+                     provider=DEFAULT_PROVIDER, model=None, retry_callback=None,
+                     cancel_event=None):
     provider_config = PROVIDERS.get(provider)
     if not provider_config:
         raise ValueError(f"不支持的 AI 服务商：{provider}")
@@ -1161,40 +1159,28 @@ def _chat_completion(api_key, prompt, max_tokens=2000,
         NVIDIA_REQUEST_TIMEOUT if provider == "nvidia"
         else DEEPSEEK_REQUEST_TIMEOUT
     )
-    attempts = NVIDIA_MAX_ATTEMPTS if provider == "nvidia" else 1
-    response = None
-    for attempt in range(1, attempts + 1):
-        try:
-            response = requests.post(
-                str(provider_config["endpoint"]),
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-            )
-            break
-        except requests.ReadTimeout as exc:
-            if provider != "nvidia":
-                raise RuntimeError(
-                    "DeepSeek API 等待超过 90 秒，请检查网络后重试。"
-                ) from exc
-            if attempt < attempts:
-                _notify_summary_progress(
-                    retry_callback,
-                    f"NVIDIA 免费端点等待超时，正在自动重试 "
-                    f"{attempt}/{attempts - 1}...",
-                )
-                time.sleep(NVIDIA_RETRY_DELAY_SECONDS)
-                continue
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("任务已取消。")
+    try:
+        response = requests.post(
+            str(provider_config["endpoint"]),
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.ReadTimeout as exc:
+        if provider != "nvidia":
             raise RuntimeError(
-                "NVIDIA 免费端点连续两次等待超过 240 秒。"
-                "这通常是模型高负载，不是 API Key 错误；"
-                "请稍后重试或换一个 Free Endpoint 模型。"
+                "DeepSeek API 等待超过 90 秒，请检查网络后重试。"
             ) from exc
-        except requests.RequestException as exc:
-            raise RuntimeError(f"连接 {label} API 失败：{exc}") from exc
-
-    if response is None:
-        raise RuntimeError(f"连接 {label} API 失败：未收到响应。")
+        raise RuntimeError(
+            "NVIDIA 免费端点等待超过 120 秒。"
+            "这通常是模型高负载，不是 API Key 错误；请稍后重试。"
+        ) from exc
+    except requests.RequestException as exc:
+        raise RuntimeError(f"连接 {label} API 失败：{exc}") from exc
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("任务已取消。")
 
     if provider == "nvidia":
         error_messages = {
@@ -1306,7 +1292,8 @@ def to_wechat_plain_text(text):
 
 
 def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
-                 progress_callback=None, provider=DEFAULT_PROVIDER, model=None):
+                 progress_callback=None, provider=DEFAULT_PROVIDER, model=None,
+                 cancel_event=None):
     """调用选定的 AI 服务；长记录自动分段提炼后再合并。"""
     if not messages:
         return "该时间段内没有消息。"
@@ -1346,6 +1333,7 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                     provider=provider,
                     model=model,
                     retry_callback=progress_callback,
+                    cancel_event=cancel_event,
                 )
             )
 
@@ -1373,6 +1361,7 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                     provider=provider,
                     model=model,
                     retry_callback=progress_callback,
+                    cancel_event=cancel_event,
                 )
             )
 
@@ -1403,6 +1392,7 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                         provider=provider,
                         model=model,
                         retry_callback=progress_callback,
+                        cancel_event=cancel_event,
                     )
                 )
             partial_summaries = reduced
@@ -1426,6 +1416,7 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                 provider=provider,
                 model=model,
                 retry_callback=progress_callback,
+                cancel_event=cancel_event,
             )
         )
     except Exception as e:
@@ -1594,7 +1585,7 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
 
 def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
                         provider=DEFAULT_PROVIDER, model=None,
-                        progress_callback=None):
+                        progress_callback=None, cancel_event=None):
     """把已提炼的文字总结压缩为单页图片所需的结构化字段。"""
     if not str(summary or "").strip():
         raise ValueError("没有可用于生成图片日报的总结内容。")
@@ -1613,6 +1604,7 @@ def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
             provider=provider,
             model=model,
             retry_callback=progress_callback,
+            cancel_event=cancel_event,
         )
         data = _parse_json_object(response)
         return _normalise_newspaper_digest(

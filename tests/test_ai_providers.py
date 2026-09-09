@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 import tempfile
+import threading
 
 import requests
 from PIL import Image
@@ -10,6 +11,7 @@ from newspaper_renderer import CANVAS_SIZE, render_newspaper
 from wechat_summary import (
     _chat_completion,
     _deepseek_chat,
+    _split_summary_chunks,
     ai_newspaper_digest,
     ai_summarize,
     provider_default_model,
@@ -60,40 +62,39 @@ class AIProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "频率或额度限制"):
             _chat_completion("test-key", "test", provider="nvidia")
 
-    @mock.patch("wechat_summary.time.sleep")
     @mock.patch("wechat_summary.requests.post")
-    def test_nvidia_read_timeout_retries_once(self, post, sleep):
-        response = mock.Mock(status_code=200)
-        response.raise_for_status.return_value = None
-        response.json.return_value = {
-            "choices": [{"message": {"content": "重试成功"}}]
-        }
-        post.side_effect = [requests.ReadTimeout("slow"), response]
-        progress = []
-
-        result = _chat_completion(
-            "test-key",
-            "test",
-            provider="nvidia",
-            retry_callback=progress.append,
-        )
-
-        self.assertEqual(result, "重试成功")
-        self.assertEqual(post.call_count, 2)
-        self.assertEqual(post.call_args.kwargs["timeout"], (20, 240))
-        self.assertEqual(sleep.call_count, 1)
-        self.assertTrue(any("自动重试" in message for message in progress))
-
-    @mock.patch("wechat_summary.time.sleep")
-    @mock.patch("wechat_summary.requests.post")
-    def test_nvidia_repeated_timeout_has_friendly_error(self, post, sleep):
+    def test_nvidia_timeout_stops_after_one_attempt(self, post):
         post.side_effect = requests.ReadTimeout("slow")
 
-        with self.assertRaisesRegex(RuntimeError, "不是 API Key 错误"):
+        with self.assertRaisesRegex(RuntimeError, "120 秒"):
             _chat_completion("test-key", "test", provider="nvidia")
 
-        self.assertEqual(post.call_count, 2)
-        self.assertEqual(sleep.call_count, 1)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["timeout"], (20, 120))
+
+    def test_large_chat_uses_larger_chunks(self):
+        chunks = _split_summary_chunks(["甲" * 99000, "乙" * 900])
+        self.assertEqual(len(chunks), 1)
+
+    @mock.patch("wechat_summary._chat_completion", return_value="快速总结")
+    def test_1782_short_messages_need_only_one_summary_request(self, chat):
+        result = ai_summarize(
+            [f"[{index:04d}] 群友：今天聊点新鲜事" for index in range(1782)],
+            "test-key",
+            provider="nvidia",
+        )
+        self.assertEqual(result, "快速总结")
+        self.assertEqual(chat.call_count, 1)
+
+    @mock.patch("wechat_summary.requests.post")
+    def test_cancelled_request_does_not_reach_network(self, post):
+        cancel_event = threading.Event()
+        cancel_event.set()
+        with self.assertRaisesRegex(RuntimeError, "任务已取消"):
+            _chat_completion(
+                "test-key", "test", provider="nvidia", cancel_event=cancel_event
+            )
+        post.assert_not_called()
 
     def test_provider_default_models(self):
         self.assertEqual(provider_default_model("deepseek"), "deepseek-chat")
