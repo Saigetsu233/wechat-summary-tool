@@ -1,0 +1,5 @@
+tkcalendar>=1.6,<2
+pycryptodome>=3.20,<4
+requests>=2.31,<3
+psutil>=5.9,<8
+Pillow>=10,<13

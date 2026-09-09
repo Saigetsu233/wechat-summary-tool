@@ -1425,6 +1425,142 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
         raise RuntimeError(f"AI总结失败：{e}") from e
 
 
+NEWSPAPER_DIGEST_PROMPT = """\
+你是中文报纸的头版编辑。请把下面的群聊总结压缩成一张单页日报的内容。
+
+群聊：{group_name}
+日期：{date_range}
+消息数：{message_count}
+
+{summary}
+
+只输出一个 JSON 对象，不得输出 Markdown、代码块或解释。格式为：
+{{
+  "headline": "12～24个字的头版标题",
+  "lead": "60～100个字的今日导语",
+  "topics": [
+    {{"title": "话题短标题", "summary": "60～100字，说清起因、讨论或结果"}}
+  ],
+  "mvp": {{"name": "昵称", "title": "有趣但不冒犯的称号", "reason": "40～70字理由"}},
+  "achievements": [
+    {{"award": "趣味成就名", "name": "昵称", "reason": "20～40字理由"}}
+  ],
+  "quote": {{"speaker": "昵称", "text": "今日真实金句"}}
+}}
+
+要求：
+1. topics 只选 3 个最重要的话题，achievements 只选 3 个。
+2. 宁可少写也不要把字挤得过密，所有字段都要简短。
+3. 只能使用来源总结中已有的事实和发言人，不得杜撰。
+4. 不使用 emoji、网络链接或换行符，保持报纸杂志语气。
+5. 如果金句或 MVP 归属不确定，对应 name 使用“群友”，禁止猜测。
+"""
+
+
+def _short_text(value, limit):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text if len(text) <= limit else text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _parse_json_object(value):
+    text = str(value or "").strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("模型没有返回可用的 JSON 对象")
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"模型返回的日报 JSON 无法解析：{exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("模型返回的日报数据不是 JSON 对象")
+    return data
+
+
+def _normalise_newspaper_digest(data, group_name, date_range, message_count):
+    topics = data.get("topics") if isinstance(data.get("topics"), list) else []
+    clean_topics = []
+    for item in topics[:3]:
+        if not isinstance(item, dict):
+            continue
+        title = _short_text(item.get("title"), 18)
+        summary = _short_text(item.get("summary"), 120)
+        if title or summary:
+            clean_topics.append(
+                {"title": title or "今日重点", "summary": summary}
+            )
+
+    raw_mvp = data.get("mvp") if isinstance(data.get("mvp"), dict) else {}
+    raw_achievements = (
+        data.get("achievements")
+        if isinstance(data.get("achievements"), list)
+        else []
+    )
+    achievements = []
+    for item in raw_achievements[:3]:
+        if not isinstance(item, dict):
+            continue
+        achievements.append(
+            {
+                "award": _short_text(item.get("award"), 16) or "今日成就",
+                "name": _short_text(item.get("name"), 14) or "群友",
+                "reason": _short_text(item.get("reason"), 52),
+            }
+        )
+    raw_quote = data.get("quote") if isinstance(data.get("quote"), dict) else {}
+
+    return {
+        "date": _short_text(date_range, 32),
+        "group_name": _short_text(group_name, 24),
+        "message_count": str(int(message_count)),
+        "headline": _short_text(data.get("headline"), 28) or "今日群聊，重点都在这里",
+        "lead": _short_text(data.get("lead"), 130),
+        "topics": clean_topics,
+        "mvp": {
+            "name": _short_text(raw_mvp.get("name"), 16) or "群友",
+            "title": _short_text(raw_mvp.get("title"), 20),
+            "reason": _short_text(raw_mvp.get("reason"), 80),
+        },
+        "achievements": achievements,
+        "quote": {
+            "speaker": _short_text(raw_quote.get("speaker"), 16),
+            "text": _short_text(raw_quote.get("text"), 90),
+        },
+    }
+
+
+def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
+                        provider=DEFAULT_PROVIDER, model=None,
+                        progress_callback=None):
+    """把已提炼的文字总结压缩为单页图片所需的结构化字段。"""
+    if not str(summary or "").strip():
+        raise ValueError("没有可用于生成图片日报的总结内容。")
+    _notify_summary_progress(progress_callback, "正在挑选单页日报重点...")
+    prompt = NEWSPAPER_DIGEST_PROMPT.format(
+        group_name=group_name,
+        date_range=date_range,
+        message_count=message_count,
+        summary=summary,
+    )
+    try:
+        response = _chat_completion(
+            api_key,
+            prompt,
+            max_tokens=1500,
+            provider=provider,
+            model=model,
+            retry_callback=progress_callback,
+        )
+        data = _parse_json_object(response)
+        return _normalise_newspaper_digest(
+            data, group_name, date_range, message_count
+        )
+    except Exception as exc:
+        raise RuntimeError(f"图片日报内容生成失败：{exc}") from exc
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. 配置管理
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1450,7 +1586,7 @@ def save_config(cfg):
 
 def install_deps():
     """自动安装依赖"""
-    packages = ["pycryptodome", "requests", "psutil"]
+    packages = ["pycryptodome", "requests", "psutil", "pillow"]
     for pkg in packages:
         try:
             if pkg == "pycryptodome":
@@ -1459,6 +1595,8 @@ def install_deps():
                 import requests
             elif pkg == "psutil":
                 import psutil
+            elif pkg == "pillow":
+                from PIL import Image
         except ImportError:
             print(f"正在安装依赖 {pkg}...")
             subprocess.run([sys.executable, "-m", "pip", "install", pkg, "-q"], check=False)

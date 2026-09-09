@@ -10,6 +10,7 @@ import threading
 import datetime
 import os
 import re
+import subprocess
 import sys
 import sqlite3
 import traceback
@@ -20,9 +21,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from tkcalendar import DateEntry
 except ImportError:
-    import subprocess
     subprocess.run([sys.executable, "-m", "pip", "install", "tkcalendar", "-q"], check=False)
     from tkcalendar import DateEntry
+
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "pillow", "-q"], check=False)
+    from PIL import Image, ImageTk
 
 from wechat_summary import (
     find_wechat_data_dir,
@@ -34,6 +40,7 @@ from wechat_summary import (
     load_contact_name_map,
     get_messages_by_range,
     ai_summarize,
+    ai_newspaper_digest,
     load_config,
     save_config,
     DEFAULT_PROMPT_TEMPLATE,
@@ -42,6 +49,7 @@ from wechat_summary import (
     provider_default_model,
     provider_label,
 )
+from newspaper_renderer import render_newspaper
 
 class WeChatSummaryApp:
     def __init__(self, root):
@@ -58,6 +66,8 @@ class WeChatSummaryApp:
         self.tmp_contact_path = None
         self.chatrooms = []   # [(chatroom_id, count, display_name), ...]
         self.contact_name_map = {}
+        self._last_summary_key = None
+        self._last_summary_text = ""
         self.config = load_config()
         self._initialized = False
 
@@ -182,6 +192,15 @@ class WeChatSummaryApp:
                                         state="disabled", width=20)
         self.btn_summarize.pack(side="left")
 
+        self.btn_image = ttk.Button(
+            btn_row,
+            text="生成图片日报",
+            command=self._on_image_click,
+            state="disabled",
+            width=16,
+        )
+        self.btn_image.pack(side="left", padx=(10, 0))
+
         self.btn_edit_prompt = ttk.Button(btn_row, text="修改提示词",
                                           command=self._on_edit_prompt, width=12)
         self.btn_edit_prompt.pack(side="left", padx=(10, 0))
@@ -272,6 +291,9 @@ class WeChatSummaryApp:
             self.btn_init.config(state=state)
             self.btn_manual.config(state=state)
             self.btn_summarize.config(
+                state="normal" if enabled and self._initialized else "disabled"
+            )
+            self.btn_image.config(
                 state="normal" if enabled and self._initialized else "disabled"
             )
             self.chatroom_combo.config(
@@ -388,6 +410,8 @@ class WeChatSummaryApp:
         self.tmp_msg_paths = []
         self.tmp_contact_path = None
         self.contact_name_map = {}
+        self._last_summary_key = None
+        self._last_summary_text = ""
 
     # ─────────────────────────────────────────────────────────────────────────
     # 初始化流程
@@ -543,6 +567,7 @@ class WeChatSummaryApp:
         if values:
             self.chatroom_combo.current(0)
         self.btn_summarize.config(state="normal")
+        self.btn_image.config(state="normal")
 
     # ─────────────────────────────────────────────────────────────────────────
     # 生成总结流程
@@ -628,6 +653,16 @@ class WeChatSummaryApp:
                                    prompt_template=self._prompt_template,
                                    progress_callback=self._set_status,
                                    provider=provider, model=model)
+            self._last_summary_key = (
+                chatroom_id,
+                start_ts,
+                end_ts,
+                n,
+                messages[-1],
+                provider,
+                model,
+            )
+            self._last_summary_text = summary
 
             # 加上日期标题
             header = (f"群聊：{group_name}\n"
@@ -646,6 +681,166 @@ class WeChatSummaryApp:
         finally:
             self._set_progress(False)
             self._set_ui_enabled(True)
+
+    def _on_image_click(self):
+        if not self.conn_msg:
+            messagebox.showwarning("提示", "请先点击「初始化」")
+            return
+        if not self.chatroom_var.get():
+            messagebox.showwarning("提示", "请选择群聊")
+            return
+
+        start_d = self.start_date.get_date()
+        end_d = self.end_date.get_date()
+        if start_d > end_d:
+            messagebox.showwarning("日期错误", "开始日期不能晚于结束日期")
+            return
+
+        idx = self.chatroom_combo.current()
+        self._remember_provider_settings()
+        provider = self.current_provider
+        api_key = str(self.provider_keys.get(provider) or "").strip()
+        model = str(self.provider_models.get(provider) or "").strip()
+        if not api_key:
+            messagebox.showwarning(
+                "提示", f"请先填写 {provider_label(provider)} API Key。"
+            )
+            return
+        if not model:
+            messagebox.showwarning("提示", "请先填写模型名。")
+            return
+
+        output_path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG 图片", "*.png")],
+            initialfile=f"群聊日报_{start_d:%Y%m%d}.png",
+            title="保存单页图片日报",
+        )
+        if not output_path:
+            return
+
+        self._set_ui_enabled(False)
+        self._set_progress(True)
+        self.msg_count_label.config(text="")
+        self._set_status("正在读取消息，准备图片日报...")
+        threading.Thread(
+            target=self._image_thread,
+            args=(idx, start_d, end_d, provider, api_key, model, output_path),
+            daemon=True,
+        ).start()
+
+    def _image_thread(self, idx, start_d, end_d, provider, api_key, model,
+                      output_path):
+        try:
+            if idx < 0 or idx >= len(self.chatrooms):
+                raise ValueError("请选择一个群聊")
+            chatroom_id, _count, display = self.chatrooms[idx]
+            group_name = display.split("（")[0].strip()
+            start_ts = int(
+                datetime.datetime.combine(start_d, datetime.time.min).timestamp()
+            )
+            end_ts = int(
+                datetime.datetime.combine(end_d, datetime.time.max).timestamp()
+            )
+            messages = get_messages_by_range(
+                self.conn_msg,
+                chatroom_id,
+                start_ts,
+                end_ts,
+                sender_name_map=self.contact_name_map,
+            )
+            if not messages:
+                raise ValueError("该时间段内没有文本消息。")
+
+            count = len(messages)
+            cache_key = (
+                chatroom_id,
+                start_ts,
+                end_ts,
+                count,
+                messages[-1],
+                provider,
+                model,
+            )
+            self.root.after(
+                0,
+                lambda: self.msg_count_label.config(
+                    text=f"共 {count} 条消息，图片日报生成中..."
+                ),
+            )
+            if self._last_summary_key == cache_key and self._last_summary_text:
+                summary = self._last_summary_text
+                self._set_status("正在复用刚才的文字总结...")
+            else:
+                days_approx = (end_d - start_d).days + 1
+                summary = ai_summarize(
+                    messages,
+                    api_key,
+                    group_id=chatroom_id,
+                    days=days_approx,
+                    prompt_template=self._prompt_template,
+                    progress_callback=self._set_status,
+                    provider=provider,
+                    model=model,
+                )
+                self._last_summary_key = cache_key
+                self._last_summary_text = summary
+
+            date_range = f"{start_d} 至 {end_d}"
+            digest = ai_newspaper_digest(
+                summary,
+                api_key,
+                group_name,
+                date_range,
+                count,
+                provider=provider,
+                model=model,
+                progress_callback=self._set_status,
+            )
+            self._set_status("正在本地排版报纸图片...")
+            rendered_path = render_newspaper(digest, output_path)
+
+            def show_complete():
+                self.msg_count_label.config(text=f"共 {count} 条消息")
+                self._set_status(f"图片日报已保存：{rendered_path}")
+                self._show_image_preview(rendered_path)
+
+            self.root.after(0, show_complete)
+        except Exception as exc:
+            error = str(exc)
+
+            def show_error():
+                messagebox.showerror("图片日报生成失败", error)
+                self._set_status(f"图片日报生成失败：{error}")
+
+            self.root.after(0, show_error)
+        finally:
+            self._set_progress(False)
+            self._set_ui_enabled(True)
+
+    def _show_image_preview(self, image_path):
+        preview = tk.Toplevel(self.root)
+        preview.title("图片日报预览")
+        preview.minsize(520, 680)
+        with Image.open(image_path) as opened:
+            source = opened.copy()
+        resampling = getattr(Image, "Resampling", Image)
+        source.thumbnail((660, 820), resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(source)
+        image_label = ttk.Label(preview, image=photo)
+        image_label.image = photo
+        image_label.pack(fill="both", expand=True, padx=12, pady=12)
+        buttons = ttk.Frame(preview)
+        buttons.pack(pady=(0, 12))
+        ttk.Button(
+            buttons,
+            text="打开原图",
+            command=lambda: os.startfile(str(image_path)),
+            width=14,
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            buttons, text="关闭", command=preview.destroy, width=12
+        ).pack(side="left", padx=6)
 
     # ─────────────────────────────────────────────────────────────────────────
     # 复制 / 保存

@@ -1,11 +1,16 @@
 import unittest
 from unittest import mock
+from pathlib import Path
+import tempfile
 
 import requests
+from PIL import Image
 
+from newspaper_renderer import CANVAS_SIZE, render_newspaper
 from wechat_summary import (
     _chat_completion,
     _deepseek_chat,
+    ai_newspaper_digest,
     ai_summarize,
     provider_default_model,
     to_wechat_plain_text,
@@ -129,6 +134,67 @@ class AIProviderTests(unittest.TestCase):
         self.assertNotIn("**", result)
         self.assertNotIn("| ---", result)
         self.assertIn("1、MVP｜小明", result)
+
+    @mock.patch("wechat_summary._chat_completion")
+    def test_newspaper_digest_parses_and_limits_content(self, chat):
+        chat.return_value = """```json
+        {
+          "headline": "雪季未至装备先卷起来",
+          "lead": "群友今天主要讨论了雪板选购与周末行程。",
+          "topics": [
+            {"title": "雪板选购", "summary": "大家比较了三款雪板。"},
+            {"title": "周末行程", "summary": "初步决定周六出发。"},
+            {"title": "装备保养", "summary": "群友分享了打蜡经验。"},
+            {"title": "多余话题", "summary": "这条应被裁掉。"}
+          ],
+          "mvp": {"name": "阿雪", "title": "装备参谋", "reason": "整理了对比数据。"},
+          "achievements": [
+            {"award": "种草王", "name": "小明", "reason": "连发三个链接。"}
+          ],
+          "quote": {"speaker": "阿雪", "text": "人可以不快，装备要帅。"}
+        }
+        ```"""
+
+        digest = ai_newspaper_digest(
+            "今日聊了雪板与行程。",
+            "test-key",
+            "滑雪群",
+            "2026-09-09 至 2026-09-09",
+            564,
+            provider="nvidia",
+        )
+
+        self.assertEqual(digest["group_name"], "滑雪群")
+        self.assertEqual(digest["message_count"], "564")
+        self.assertEqual(len(digest["topics"]), 3)
+        self.assertEqual(digest["mvp"]["name"], "阿雪")
+        self.assertEqual(chat.call_args.kwargs["provider"], "nvidia")
+
+    def test_newspaper_renderer_creates_single_page_png(self):
+        digest = {
+            "date": "2026-09-09",
+            "group_name": "滑雪营销号病友群",
+            "message_count": "564",
+            "headline": "雪季未至，装备先卷起来",
+            "lead": "群友围绕雪板、行程和装备保养展开讨论。",
+            "topics": [
+                {"title": "雪板选购", "summary": "比较三款板子后给出了具体建议。"},
+                {"title": "周末行程", "summary": "初步定下周六早上出发。"},
+                {"title": "打蜡时间", "summary": "大家分享了雪板保养经验。"},
+            ],
+            "mvp": {"name": "阿雪", "title": "装备参谋", "reason": "整理了关键参数。"},
+            "achievements": [
+                {"award": "种草王", "name": "小明", "reason": "分享了实用装备。"}
+            ],
+            "quote": {"speaker": "阿雪", "text": "人可以不快，装备要帅。"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "daily.png"
+            render_newspaper(digest, output)
+            self.assertTrue(output.is_file())
+            with Image.open(output) as rendered:
+                self.assertEqual(rendered.size, CANVAS_SIZE)
+                self.assertEqual(rendered.mode, "RGB")
 
 
 if __name__ == "__main__":
