@@ -109,6 +109,10 @@ class WeChatSummaryApp:
             self.provider_keys["deepseek"] = legacy_key
         stored_models = self.config.get("models")
         self.provider_models = dict(stored_models) if isinstance(stored_models, dict) else {}
+        # v1.2.1 曾把超大 Pro 模型作为默认值，长群聊在免费端点上经常超时。
+        # 只迁移这个历史默认值；用户手动填写的其他模型保持不变。
+        if self.provider_models.get("nvidia") == "deepseek-ai/deepseek-v4-pro-0813":
+            self.provider_models["nvidia"] = provider_default_model("nvidia")
         self.current_provider = configured_provider
         self.provider_var = tk.StringVar(value=provider_label(configured_provider))
         self.api_key_var = tk.StringVar(

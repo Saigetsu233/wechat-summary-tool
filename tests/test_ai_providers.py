@@ -6,6 +6,7 @@ import threading
 
 import requests
 from PIL import Image
+import wechat_summary
 
 from newspaper_renderer import CANVAS_SIZE, render_newspaper
 from wechat_summary import (
@@ -55,6 +56,10 @@ class AIProviderTests(unittest.TestCase):
             post.call_args.kwargs["headers"]["Authorization"],
             "Bearer nvidia-test-key",
         )
+        self.assertEqual(
+            post.call_args.kwargs["json"]["chat_template_kwargs"],
+            {"thinking": False},
+        )
 
     @mock.patch("wechat_summary.requests.post")
     def test_nvidia_rate_limit_has_friendly_error(self, post):
@@ -72,18 +77,41 @@ class AIProviderTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
         self.assertEqual(post.call_args.kwargs["timeout"], (20, 120))
 
-    def test_large_chat_uses_larger_chunks(self):
+    def test_large_chat_is_split_into_latency_safe_chunks(self):
         chunks = _split_summary_chunks(["甲" * 99000, "乙" * 900])
-        self.assertEqual(len(chunks), 1)
+        self.assertEqual(len(chunks), 5)
+        self.assertTrue(all(len(chunk) <= 24000 for chunk in chunks))
 
     @mock.patch("wechat_summary._chat_completion", return_value="快速总结")
-    def test_1782_short_messages_need_only_one_summary_request(self, chat):
-        result = ai_summarize(
-            [f"[{index:04d}] 群友：今天聊点新鲜事" for index in range(1782)],
-            "test-key",
-            provider="nvidia",
-        )
+    @mock.patch("wechat_summary._load_summary_cache", return_value=None)
+    @mock.patch("wechat_summary._save_summary_cache")
+    def test_1782_short_messages_are_split_before_final_summary(
+            self, _save, _load, chat):
+        messages = [
+            f"[{index:04d}] 群友：今天聊点新鲜事，顺便讨论一个具体问题"
+            for index in range(1782)
+        ]
+        chunks = _split_summary_chunks(messages)
+        result = ai_summarize(messages, "test-key", provider="nvidia")
         self.assertEqual(result, "快速总结")
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(chat.call_count, len(chunks) + 1)
+
+    def test_completed_summary_request_is_resumed_from_disk_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            wechat_summary, "SUMMARY_CACHE_DIR", temp_dir
+        ), mock.patch(
+            "wechat_summary._chat_completion", return_value="已完成的分段摘要"
+        ) as chat:
+            first = wechat_summary._cached_summary_completion(
+                "test-key", "同一段聊天", provider="nvidia"
+            )
+            second = wechat_summary._cached_summary_completion(
+                "test-key", "同一段聊天", provider="nvidia"
+            )
+
+        self.assertEqual(first, "已完成的分段摘要")
+        self.assertEqual(second, first)
         self.assertEqual(chat.call_count, 1)
 
     @mock.patch("wechat_summary.requests.post")
@@ -100,11 +128,14 @@ class AIProviderTests(unittest.TestCase):
         self.assertEqual(provider_default_model("deepseek"), "deepseek-chat")
         self.assertEqual(
             provider_default_model("nvidia"),
-            "deepseek-ai/deepseek-v4-pro-0813",
+            "deepseek-ai/deepseek-v4-flash-0731",
         )
 
     @mock.patch("wechat_summary._chat_completion", return_value="NVIDIA 摘要")
-    def test_ai_summarize_forwards_provider_and_model(self, chat):
+    @mock.patch("wechat_summary._load_summary_cache", return_value=None)
+    @mock.patch("wechat_summary._save_summary_cache")
+    def test_ai_summarize_forwards_provider_and_model(
+            self, _save, _load, chat):
         result = ai_summarize(
             ["[12:00] 群友1：今天去滑雪"],
             "test-key",

@@ -74,7 +74,9 @@ pip install -r requirements.txt
 2. 点击模型页的 **Generate API Key**。
 3. 在工具中选择“NVIDIA API Catalog”并粘贴 Key。
 
-默认模型为截图中的 `deepseek-ai/deepseek-v4-pro-0813`。模型名可以直接编辑；如果 NVIDIA 返回模型不存在，请从当前模型页复制最新的 `model` 值。免费模型、频率、额度和可用性可能变化，以 NVIDIA 页面当时显示为准。
+默认模型为更适合长文本摘要的 `deepseek-ai/deepseek-v4-flash-0731`。旧版本保存的默认 Pro 模型会自动迁移为 Flash；用户手动填写的其他模型不会被修改。模型名可以直接编辑；如果 NVIDIA 返回模型不存在，请从当前模型页复制最新的 `model` 值。免费模型、频率、额度和可用性可能变化，以 NVIDIA 页面当时显示为准。
+
+长聊天会按约 2.4 万字符分段处理。每一段完成后只在本机缓存 AI 的提炼结果（不缓存聊天原文），如果后续请求超时，再次生成会从已完成的段落继续。源码版缓存位于项目的 `.summary_cache`，EXE 版位于 `%LOCALAPPDATA%\ChatroomDigest\.summary_cache`。
 
 NVIDIA 免费端点高负载时可能变慢。工具按约 10 万字处理长记录，单次请求最多等待 120 秒且不再静默长时间重试；每个阶段和分段进度会直接显示在主面板。
 

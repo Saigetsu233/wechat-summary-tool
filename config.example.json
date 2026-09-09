@@ -6,6 +6,6 @@
   },
   "models": {
     "deepseek": "deepseek-chat",
-    "nvidia": "deepseek-ai/deepseek-v4-pro-0813"
+    "nvidia": "deepseek-ai/deepseek-v4-flash-0731"
   }
 }

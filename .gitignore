@@ -7,6 +7,7 @@ __pycache__/
 config.json
 .env
 .wechat_summary_tmp/
+.summary_cache/
 *.db
 *.db-shm
 *.db-wal

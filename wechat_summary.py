@@ -66,7 +66,7 @@ PROVIDERS = {
     "nvidia": {
         "label": "NVIDIA API Catalog",
         "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
-        "default_model": "deepseek-ai/deepseek-v4-pro-0813",
+        "default_model": "deepseek-ai/deepseek-v4-flash-0731",
     },
 }
 DEEPSEEK_REQUEST_TIMEOUT = (15, 90)
@@ -1080,7 +1080,12 @@ DEFAULT_PROMPT_TEMPLATE = """\
 # {messages}  → 聊天记录正文
 
 
-SUMMARY_CHUNK_CHARS = 100000
+# 免费推理端点的最大上下文并不等于能在超时内处理完的输入量。
+# 约 2.4 万字符能显著降低单次首 token 延迟，同时避免产生过多请求。
+SUMMARY_CHUNK_CHARS = 24000
+SUMMARY_CACHE_VERSION = 1
+SUMMARY_CACHE_DIR = os.path.join(APP_DATA_DIR, ".summary_cache")
+SUMMARY_CACHE_MAX_FILES = 200
 
 
 def _split_summary_chunks(items, max_chars=SUMMARY_CHUNK_CHARS):
@@ -1114,6 +1119,91 @@ def _notify_summary_progress(callback, message):
             callback(message)
         except Exception:
             pass
+
+
+def _summary_cache_key(provider, model, max_tokens, prompt):
+    """为总结阶段生成不暴露聊天正文的稳定缓存键。"""
+    selected_model = str(model or "").strip() or provider_default_model(provider)
+    source = json.dumps(
+        {
+            "version": SUMMARY_CACHE_VERSION,
+            "provider": provider,
+            "model": selected_model,
+            "max_tokens": int(max_tokens),
+            "prompt": prompt,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _load_summary_cache(cache_key):
+    path = os.path.join(SUMMARY_CACHE_DIR, f"{cache_key}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as source:
+            data = json.load(source)
+        text = data.get("text") if isinstance(data, dict) else None
+        return text if isinstance(text, str) and text.strip() else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _prune_summary_cache():
+    try:
+        entries = [
+            os.path.join(SUMMARY_CACHE_DIR, name)
+            for name in os.listdir(SUMMARY_CACHE_DIR)
+            if name.endswith(".json")
+        ]
+        entries.sort(key=os.path.getmtime, reverse=True)
+        for path in entries[SUMMARY_CACHE_MAX_FILES:]:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _save_summary_cache(cache_key, text):
+    """仅缓存模型输出；聊天原文不会写入缓存文件。"""
+    try:
+        os.makedirs(SUMMARY_CACHE_DIR, exist_ok=True)
+        final_path = os.path.join(SUMMARY_CACHE_DIR, f"{cache_key}.json")
+        temp_path = final_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as target:
+            json.dump({"text": text}, target, ensure_ascii=False)
+        os.replace(temp_path, final_path)
+        _prune_summary_cache()
+    except OSError:
+        # 缓存失败不能影响正常生成。
+        pass
+
+
+def _cached_summary_completion(api_key, prompt, max_tokens=2000,
+                               provider=DEFAULT_PROVIDER, model=None,
+                               progress_callback=None, cache_message=None,
+                               cancel_event=None):
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("任务已取消。")
+    cache_key = _summary_cache_key(provider, model, max_tokens, prompt)
+    cached = _load_summary_cache(cache_key)
+    if cached is not None:
+        if cache_message:
+            _notify_summary_progress(progress_callback, cache_message)
+        return cached
+    result = _chat_completion(
+        api_key,
+        prompt,
+        max_tokens=max_tokens,
+        provider=provider,
+        model=model,
+        retry_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
+    _save_summary_cache(cache_key, result)
+    return result
 
 
 def provider_label(provider):
@@ -1155,6 +1245,10 @@ def _chat_completion(api_key, prompt, max_tokens=2000,
         "temperature": 0.3,
         "max_tokens": max_tokens,
     }
+    # NVIDIA 的 DeepSeek V4 示例支持显式关闭思考模式。群聊摘要不需要
+    # 输出推理过程，关闭后可明显减少免费端点的等待和输出 token。
+    if provider == "nvidia" and "deepseek-v4" in selected_model.lower():
+        payload["chat_template_kwargs"] = {"thinking": False}
     timeout = (
         NVIDIA_REQUEST_TIMEOUT if provider == "nvidia"
         else DEEPSEEK_REQUEST_TIMEOUT
@@ -1175,7 +1269,7 @@ def _chat_completion(api_key, prompt, max_tokens=2000,
             ) from exc
         raise RuntimeError(
             "NVIDIA 免费端点等待超过 120 秒。"
-            "这通常是模型高负载，不是 API Key 错误；请稍后重试。"
+            "本段没有完成，但此前完成的段落已保留；再次生成会从缓存继续。"
         ) from exc
     except requests.RequestException as exc:
         raise RuntimeError(f"连接 {label} API 失败：{exc}") from exc
@@ -1327,12 +1421,13 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
                 messages=chunks[0],
             )
             return to_wechat_plain_text(
-                _chat_completion(
+                _cached_summary_completion(
                     api_key,
                     prompt,
                     provider=provider,
                     model=model,
-                    retry_callback=progress_callback,
+                    progress_callback=progress_callback,
+                    cache_message="已恢复上次生成完成的总结。",
                     cancel_event=cancel_event,
                 )
             )
@@ -1354,13 +1449,14 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
 涉及个人观点或趣味事件时保留真实发送者，禁止把被提及者误当成发言人；证据不足则不要署名。
 忽略寒暄与无意义闲聊，保留具体事实，输出简洁的中文要点。"""
             partial_summaries.append(
-                _chat_completion(
+                _cached_summary_completion(
                     api_key,
                     partial_prompt,
                     max_tokens=1400,
                     provider=provider,
                     model=model,
-                    retry_callback=progress_callback,
+                    progress_callback=progress_callback,
+                    cache_message=f"已恢复第 {index}/{total_chunks} 段，继续处理...",
                     cancel_event=cancel_event,
                 )
             )
@@ -1385,13 +1481,17 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
 
 {group}"""
                 reduced.append(
-                    _chat_completion(
+                    _cached_summary_completion(
                         api_key,
                         reduce_prompt,
                         max_tokens=1400,
                         provider=provider,
                         model=model,
-                        retry_callback=progress_callback,
+                        progress_callback=progress_callback,
+                        cache_message=(
+                            f"已恢复合并结果，第 {reduce_round} 轮 "
+                            f"{index}/{len(summary_groups)}..."
+                        ),
                         cancel_event=cancel_event,
                     )
                 )
@@ -1410,12 +1510,13 @@ def ai_summarize(messages, api_key, group_id="", days=1, prompt_template=None,
             messages=merged_source,
         )
         return to_wechat_plain_text(
-            _chat_completion(
+            _cached_summary_completion(
                 api_key,
                 final_prompt,
                 provider=provider,
                 model=model,
-                retry_callback=progress_callback,
+                progress_callback=progress_callback,
+                cache_message="已恢复最终总结。",
                 cancel_event=cancel_event,
             )
         )

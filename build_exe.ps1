@@ -21,6 +21,10 @@ python -m PyInstaller `
     --hidden-import "Crypto.Cipher.AES" `
     "wechat_gui.py"
 
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
+
 $exePath = Join-Path $projectDir "dist\ChatroomDigest.exe"
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Build finished without producing $exePath"
