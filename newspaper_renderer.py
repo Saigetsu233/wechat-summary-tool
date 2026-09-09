@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""将结构化的群聊摘要本地渲染为单页报纸杂志风 PNG。"""
+"""把结构化群聊摘要渲染为固定的手绘漫画信息图。"""
 
 from pathlib import Path
 import re
@@ -7,26 +7,33 @@ import re
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
-CANVAS_SIZE = (1440, 2400)
-PAPER = "#FFF9F0"
-INK = "#182033"
-MUTED = "#6A6874"
-ACCENT = "#F04F5F"
-PURPLE = "#6C5CE7"
-CYAN = "#14B8A6"
-SUN = "#FFC857"
-RULE = "#252838"
-CARD = "#F2EDFF"
-PASTELS = ("#FFE3E6", "#DDF8F3", "#EEE9FF")
+CANVAS_SIZE = (1536, 1536)
+PAPER = "#FFFDF6"
+NAVY = "#154F80"
+NAVY_DARK = "#0B355F"
+INK = "#17283D"
+MUTED = "#526579"
+WHITE = "#FFFFFF"
+BLUE = "#1596D2"
+CYAN = "#08AFC7"
+PINK = "#EF4D78"
+GREEN = "#12A36E"
+ORANGE = "#F59B23"
+PURPLE = "#7046C1"
+YELLOW = "#F6C531"
+
+SECTION_COLORS = (PINK, BLUE, GREEN, ORANGE, PURPLE, CYAN)
+SECTION_PALES = ("#FFF0F5", "#EEF7FF", "#EDFBF5", "#FFF7E8", "#F5F0FF", "#ECFBFC")
 
 
-def _font(size, bold=False):
+def _font(size, bold=False, display=False):
     windows_fonts = Path("C:/Windows/Fonts")
-    candidates = (
-        [windows_fonts / "msyhbd.ttc", windows_fonts / "simhei.ttf"]
-        if bold
-        else [windows_fonts / "msyh.ttc", windows_fonts / "simsun.ttc"]
-    )
+    if display:
+        candidates = [windows_fonts / "STHUPO.TTF", windows_fonts / "FZYTK.TTF"]
+    elif bold:
+        candidates = [windows_fonts / "msyhbd.ttc", windows_fonts / "simhei.ttf"]
+    else:
+        candidates = [windows_fonts / "msyh.ttc", windows_fonts / "Deng.ttf"]
     candidates.extend(
         [
             Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
@@ -45,20 +52,17 @@ def _clean(value):
 
 
 def _wrap(draw, text, font, max_width, max_lines):
-    """按实际像素宽度换行，超出行数时以省略号收尾。"""
     text = _clean(text)
     if not text:
         return []
-    lines = []
-    current = ""
-    consumed = 0
+    lines, current, consumed = [], "", 0
     for index, char in enumerate(text):
-        if current and char in "，。！？；：、”’）》】…":
-            current += char
-            consumed = index + 1
-            continue
         candidate = current + char
         if current and draw.textlength(candidate, font=font) > max_width:
+            if char in "，。！？；：、”’）》】…" and lines:
+                current += char
+                consumed = index + 1
+                continue
             lines.append(current.rstrip())
             current = char.lstrip()
             if len(lines) >= max_lines:
@@ -69,8 +73,7 @@ def _wrap(draw, text, font, max_width, max_lines):
         consumed = index + 1
     if len(lines) < max_lines and current:
         lines.append(current.rstrip())
-    truncated = consumed < len(text)
-    if truncated and lines:
+    if consumed < len(text) and lines:
         last = lines[-1].rstrip(" …")
         while last and draw.textlength(last + "…", font=font) > max_width:
             last = last[:-1]
@@ -78,373 +81,227 @@ def _wrap(draw, text, font, max_width, max_lines):
     return lines[:max_lines]
 
 
-def _draw_lines(draw, lines, xy, font, fill, line_gap=12):
+def _draw_lines(draw, lines, xy, font, fill=INK, gap=6, bullet=False):
     x, y = xy
     bbox = draw.textbbox((0, 0), "中Ag", font=font)
     line_height = bbox[3] - bbox[1]
     for line in lines:
-        draw.text((x, y), line, font=font, fill=fill)
-        y += line_height + line_gap
+        if bullet:
+            draw.ellipse((x, y + 10, x + 6, y + 16), fill=fill)
+            draw.text((x + 16, y), line, font=font, fill=fill)
+        else:
+            draw.text((x, y), line, font=font, fill=fill)
+        y += line_height + gap
     return y
 
 
-def _draw_sparkles(draw, x, y, color=SUN, scale=1.0):
-    """用矢量小星星做装饰，不依赖系统 emoji 字体。"""
-    size = int(12 * scale)
-    draw.polygon(
-        [(x, y - size), (x + 4, y - 4), (x + size, y), (x + 4, y + 4),
-         (x, y + size), (x - 4, y + 4), (x - size, y), (x - 4, y - 4)],
-        fill=color,
-    )
-    small = max(4, int(size * 0.45))
-    draw.polygon(
-        [(x + size + 13, y + 12 - small), (x + size + 16, y + 9),
-         (x + size + 13 + small, y + 12), (x + size + 16, y + 15),
-         (x + size + 13, y + 12 + small), (x + size + 10, y + 15),
-         (x + size + 13 - small, y + 12), (x + size + 10, y + 9)],
-        fill=color,
-    )
+def _outlined_round_rect(draw, box, radius, fill, outline, width=3, shadow=True):
+    left, top, right, bottom = [int(v) for v in box]
+    if shadow:
+        draw.rounded_rectangle((left + 4, top + 5, right + 4, bottom + 5), radius=radius, fill="#D9E3E8")
+    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+    draw.rounded_rectangle((left + 2, top + 1, right - 2, bottom - 2), radius=max(3, radius - 2), outline=outline, width=1)
 
 
-def _draw_face_sticker(draw, x, y, radius=34, sunglasses=False):
-    """绘制报刊剪贴画风笑脸贴纸。"""
-    draw.ellipse(
-        (x - radius - 5, y - radius + 6, x + radius + 5, y + radius + 16),
-        fill="#D8D0C4",
-    )
-    draw.ellipse(
-        (x - radius - 6, y - radius - 6, x + radius + 6, y + radius + 6),
-        fill="white",
-    )
-    draw.ellipse(
-        (x - radius, y - radius, x + radius, y + radius),
-        fill=SUN, outline=RULE, width=3,
-    )
-    if sunglasses:
-        draw.rounded_rectangle(
-            (x - 24, y - 13, x - 3, y + 2), radius=4, fill=RULE
-        )
-        draw.rounded_rectangle(
-            (x + 3, y - 13, x + 24, y + 2), radius=4, fill=RULE
-        )
-        draw.line((x - 3, y - 7, x + 3, y - 7), fill=RULE, width=3)
-    else:
-        draw.ellipse((x - 17, y - 12, x - 10, y - 3), fill=RULE)
-        draw.ellipse((x + 10, y - 12, x + 17, y - 3), fill=RULE)
-    draw.arc((x - 20, y - 2, x + 20, y + 25), 12, 168, fill=RULE, width=4)
-
-
-def _section_label(draw, x, y, number, title, width):
-    number_font = _font(25, bold=True)
-    title_font = _font(27, bold=True)
-    color = (ACCENT, CYAN, PURPLE)[(number - 1) % 3]
-    draw.rounded_rectangle((x, y, x + 42, y + 42), radius=8, fill=color)
-    draw.text((x + 10, y + 5), str(number), font=number_font, fill="white")
-    draw.rounded_rectangle(
-        (x + 51, y - 2, x + width, y + 45), radius=10,
-        fill=PASTELS[(number - 1) % len(PASTELS)],
-    )
-    draw.text((x + 56, y + 4), _clean(title), font=title_font, fill=INK)
-    draw.line((x, y + 56, x + width, y + 56), fill=color, width=3)
-    return y + 70
-
-
-def _paste_topic_image(canvas, source, box, accent):
-    """把图片模型生成的插画裁成圆角杂志缩略图。"""
+def _section_header(draw, box, number, title, color):
     left, top, right, bottom = box
+    _outlined_round_rect(draw, box, 20, color, NAVY_DARK, width=3, shadow=False)
+    draw.ellipse((left + 10, top + 7, left + 60, bottom - 7), fill=WHITE, outline=NAVY_DARK, width=3)
+    draw.text((left + 35, (top + bottom) // 2), str(number), font=_font(31, True), fill=color, anchor="mm")
+    draw.text((left + 72, (top + bottom) // 2 - 1), title, font=_font(31, True, True), fill=WHITE, anchor="lm")
+
+
+def _sparkles(draw, x, y, color=YELLOW):
+    draw.polygon([(x, y - 12), (x + 4, y - 4), (x + 12, y), (x + 4, y + 4), (x, y + 12), (x - 4, y + 4), (x - 12, y), (x - 4, y - 4)], fill=color)
+    draw.ellipse((x + 18, y + 10, x + 27, y + 19), fill=color)
+
+
+def _paste_sticker(canvas, source, box, accent, circular=False):
+    if not isinstance(source, Image.Image):
+        return
+    left, top, right, bottom = [int(v) for v in box]
     size = (right - left, bottom - top)
     fitted = ImageOps.fit(source.convert("RGB"), size, method=Image.Resampling.LANCZOS)
     mask = Image.new("L", size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0], size[1]), radius=16, fill=255)
-    shadow_box = (left + 6, top + 7, right + 6, bottom + 7)
-    ImageDraw.Draw(canvas).rounded_rectangle(shadow_box, radius=16, fill="#D8D0C5")
+    mask_draw = ImageDraw.Draw(mask)
+    if circular:
+        mask_draw.ellipse((0, 0, size[0] - 1, size[1] - 1), fill=255)
+    else:
+        mask_draw.rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=16, fill=255)
+    border = ImageDraw.Draw(canvas)
+    if circular:
+        border.ellipse((left - 5, top - 5, right + 5, bottom + 5), fill=WHITE, outline=accent, width=4)
+    else:
+        border.rounded_rectangle((left - 5, top - 5, right + 5, bottom + 5), radius=19, fill=WHITE, outline=accent, width=4)
     canvas.paste(fitted, (left, top), mask)
-    ImageDraw.Draw(canvas).rounded_rectangle(box, radius=16, outline=accent, width=3)
+
+
+def _draw_chat_icon(draw, x, y):
+    draw.rounded_rectangle((x, y, x + 58, y + 42), radius=14, fill=WHITE)
+    draw.polygon([(x + 12, y + 38), (x + 9, y + 55), (x + 27, y + 42)], fill=WHITE)
+    for offset in (17, 30, 43):
+        draw.ellipse((x + offset - 3, y + 18, x + offset + 3, y + 24), fill=NAVY)
+
+
+def _topic_card(canvas, draw, topic, sticker, box, index):
+    left, top, right, bottom = box
+    color = SECTION_COLORS[(index - 1) % len(SECTION_COLORS)]
+    pale = SECTION_PALES[(index - 1) % len(SECTION_PALES)]
+    _outlined_round_rect(draw, box, 18, pale, color, width=3, shadow=False)
+    draw.ellipse((left + 12, top + 10, left + 59, top + 57), fill=color, outline=WHITE, width=2)
+    draw.text((left + 35, top + 33), str(index), font=_font(27, True), fill=WHITE, anchor="mm")
+    title_font = _font(24, True)
+    _draw_lines(draw, _wrap(draw, topic.get("title") or f"今日话题 {index}", title_font, right - left - 82, 1), (left + 68, top + 16), title_font, color, 4)
+    if isinstance(sticker, Image.Image):
+        _paste_sticker(canvas, sticker, (right - 124, bottom - 112, right - 12, bottom - 12), color)
+        text_width = right - left - 150
+    else:
+        text_width = right - left - 28
+    body_font = _font(18)
+    _draw_lines(draw, _wrap(draw, topic.get("summary") or "", body_font, text_width, 6), (left + 16, top + 67), body_font, INK, 5, bullet=True)
+    _sparkles(draw, right - 142, bottom - 46, color)
+
+
+def _rank_card(canvas, draw, item, sticker, box, rank):
+    left, top, right, bottom = box
+    colors = ("#E5A70D", "#6E9BC6", "#C87843")
+    pale = ("#FFF8DA", "#F2F8FF", "#FFF2E8")[rank - 1]
+    color = colors[rank - 1]
+    _outlined_round_rect(draw, box, 18, pale, color, width=3, shadow=False)
+    image_size = min(116, right - left - 38)
+    image_left = (left + right - image_size) // 2
+    _paste_sticker(canvas, sticker, (image_left, top + 22, image_left + image_size, top + 22 + image_size), color, circular=True)
+    draw.ellipse((image_left - 7, top + 10, image_left + 35, top + 52), fill=YELLOW, outline=NAVY_DARK, width=3)
+    draw.text((image_left + 14, top + 31), str(rank), font=_font(24, True), fill=NAVY_DARK, anchor="mm")
+    name = _clean(item.get("name")) or "群友"
+    draw.text(((left + right) // 2, top + 154), name, font=_font(25, True), fill=INK, anchor="ma")
+    title = _clean(item.get("title")) or ("摸鱼大王" if rank == 1 else f"摸鱼第 {rank} 名")
+    ribbon_y = top + 190
+    draw.rounded_rectangle((left + 14, ribbon_y, right - 14, ribbon_y + 39), radius=10, fill=color)
+    draw.text(((left + right) // 2, ribbon_y + 19), title, font=_font(18, True), fill=WHITE, anchor="mm")
+    reason_font = _font(16)
+    _draw_lines(draw, _wrap(draw, item.get("reason") or "今日贡献稳定，节目效果在线。", reason_font, right - left - 28, 4), (left + 14, ribbon_y + 53), reason_font, INK, 4, bullet=True)
+
+
+def _achievement_card(canvas, draw, item, sticker, box, index):
+    left, top, right, bottom = box
+    color = SECTION_COLORS[index % len(SECTION_COLORS)]
+    _outlined_round_rect(draw, box, 16, WHITE, "#B8C5E8", width=2, shadow=False)
+    _paste_sticker(canvas, sticker, (left + 12, top + 14, left + 82, top + 84), color, circular=True)
+    award_font = _font(18, True)
+    _draw_lines(draw, _wrap(draw, item.get("award") or "今日成就", award_font, right - left - 108, 1), (left + 96, top + 13), award_font, PURPLE, 2)
+    draw.text((left + 96, top + 43), f"【{_clean(item.get('name')) or '群友'}】", font=_font(15, True), fill=color)
+    reason_font = _font(14)
+    _draw_lines(draw, _wrap(draw, item.get("reason") or "今日表现非常在线。", reason_font, right - left - 108, 3), (left + 96, top + 69), reason_font, INK, 2)
+
+
+def _numbered_list(draw, items, box, color, max_items, quote_mode=False):
+    left, top, right, bottom = box
+    body_font = _font(16)
+    row_height = max(37, (bottom - top) // max(1, max_items))
+    for index, item in enumerate(items[:max_items], start=1):
+        row_y = top + (index - 1) * row_height
+        draw.rounded_rectangle((left, row_y, right, row_y + row_height - 5), radius=10, fill=WHITE)
+        draw.ellipse((left + 8, row_y + 6, left + 40, row_y + 38), fill=color)
+        draw.text((left + 24, row_y + 22), str(index), font=_font(18, True), fill=WHITE, anchor="mm")
+        if isinstance(item, dict):
+            text, speaker = _clean(item.get("text")), _clean(item.get("speaker"))
+        else:
+            text, speaker = _clean(item), ""
+        if quote_mode and text:
+            text = f"“{text}”"
+        max_text_width = right - left - 70 - (80 if speaker else 0)
+        _draw_lines(draw, _wrap(draw, text, body_font, max_text_width, 2), (left + 51, row_y + 8), body_font, INK, 2)
+        if speaker:
+            draw.text((right - 10, row_y + 12), f"— {speaker}", font=_font(14), fill=MUTED, anchor="ra")
 
 
 def render_newspaper(digest, output_path, topic_images=None):
-    """把日报字段与可选 AI 插画渲染成一张长版 PNG。"""
+    """渲染固定 1:1 手绘漫画日报，栏目位置不会随模型输出漂移。"""
     image = Image.new("RGB", CANVAS_SIZE, PAPER)
     draw = ImageDraw.Draw(image)
-    topic_images = topic_images if isinstance(topic_images, (list, tuple)) else []
+    images = list(topic_images) if isinstance(topic_images, (list, tuple)) else []
     width, height = CANVAS_SIZE
-    margin = 76
 
-    masthead_font = _font(55, bold=True)
-    small_caps = _font(20, bold=True)
-    meta_font = _font(22)
-    headline_font = _font(42, bold=True)
-    deck_font = _font(22)
-    body_font = _font(20)
-    topic_font = _font(25, bold=True)
-    sidebar_title = _font(27, bold=True)
-    tiny_font = _font(18)
+    draw.rectangle((0, 0, width, 126), fill=NAVY)
+    draw.rectangle((0, 112, width, 126), fill=NAVY_DARK)
+    _draw_chat_icon(draw, 22, 29)
+    group_name = _clean(digest.get("group_name")) or "我们的群聊"
+    title_font = _font(48, True, True)
+    _draw_lines(draw, _wrap(draw, f"{group_name}  群聊日报", title_font, 980, 1), (101, 23), title_font, WHITE, 0)
+    draw.text((108, 82), "—  各种话题一起聊 · 轻松摸鱼不孤单  —", font=_font(19, True), fill=WHITE)
+    draw.text((1512, 24), _clean(digest.get("date")) or "TODAY", font=_font(27, True), fill=WHITE, anchor="ra")
+    draw.text((1512, 67), f"今日群聊总结 · {_clean(digest.get('message_count')) or '0'} 条消息", font=_font(17), fill=WHITE, anchor="ra")
+    _sparkles(draw, 1450, 97, WHITE)
 
-    # 背景纸张纹理与报头
-    for dot_y in range(36, height - 90, 44):
-        for dot_x in range(30, width - 20, 44):
-            draw.ellipse((dot_x, dot_y, dot_x + 2, dot_y + 2), fill="#EDE6DA")
-    draw.rectangle((0, 0, width, 24), fill=INK)
-    draw.rectangle((0, 24, width * 0.42, 31), fill=ACCENT)
-    draw.rectangle((width * 0.42, 24, width * 0.72, 31), fill=SUN)
-    draw.rectangle((width * 0.72, 24, width, 31), fill=CYAN)
-    draw.rounded_rectangle((margin, 52, margin + 225, 88), radius=18, fill=INK)
-    draw.text((margin + 15, 57), "CHATROOM DAILY", font=small_caps, fill="white")
-    draw.text((margin, 86), "群 聊 日 报", font=masthead_font, fill=INK)
-    _draw_sparkles(draw, margin + 352, 122, color=ACCENT, scale=1.25)
-    draw.rounded_rectangle(
-        (margin + 440, 104, margin + 676, 143), radius=19,
-        fill="#DDF8F3", outline=CYAN, width=2,
-    )
-    draw.text(
-        (margin + 458, 110), "今日份 · 有点东西",
-        font=_font(18, bold=True), fill=INK,
-    )
-    date_text = _clean(digest.get("date")) or "TODAY"
-    group_text = _clean(digest.get("group_name")) or "未命名群聊"
-    count_text = _clean(digest.get("message_count")) or "0"
-    right_meta = f"{date_text}\n{group_text}  |  {count_text} 条消息"
-    draw.multiline_text(
-        (width - margin, 67),
-        right_meta,
-        font=meta_font,
-        fill=MUTED,
-        anchor="ra",
-        spacing=10,
-    )
-    draw.line((margin, 184, width - margin, 184), fill=RULE, width=5)
-    draw.line((margin, 197, width - margin, 197), fill=PURPLE, width=2)
+    margin, gap = 16, 14
+    top, upper_bottom = 140, 1094
+    left_right, right_left = 712, 726
 
-    # 主标题和导语
-    headline_lines = _wrap(
-        draw,
-        digest.get("headline") or "今日群聊，重点都在这里",
-        headline_font,
-        width - margin * 2 - 95,
-        2,
-    )
-    y = _draw_lines(draw, headline_lines, (margin, 236), headline_font, INK, 12)
-    if topic_images and isinstance(topic_images[0], Image.Image):
-        _paste_topic_image(
-            image, topic_images[0],
-            (width - margin - 86, 232, width - margin, 316), PURPLE,
-        )
-    deck_lines = _wrap(
-        draw,
-        digest.get("lead") or digest.get("overview") or "今日群聊摘要。",
-        deck_font,
-        width - margin * 2,
-        3,
-    )
-    y = _draw_lines(draw, deck_lines, (margin, y + 20), deck_font, MUTED, 12)
-    divider_y = max(y + 28, 448)
-    draw.line((margin, divider_y, width - margin, divider_y), fill=RULE, width=3)
-    draw.rounded_rectangle(
-        (margin, divider_y - 15, margin + 158, divider_y + 15),
-        radius=15, fill=ACCENT,
-    )
-    draw.text(
-        (margin + 16, divider_y - 12), "TODAY'S PICKS",
-        font=_font(16, bold=True), fill="white",
-    )
+    _outlined_round_rect(draw, (margin, top, left_right, upper_bottom), 18, "#F0FAFF", BLUE, width=3, shadow=False)
+    _section_header(draw, (margin + 1, top + 1, left_right - 1, top + 60), 1, "今日群聊概览", BLUE)
+    lead_font = _font(17)
+    _draw_lines(draw, _wrap(draw, digest.get("lead") or digest.get("overview") or "今日群聊精彩纷呈。", lead_font, 656, 3), (margin + 18, top + 72), lead_font, INK, 4)
+    topics = [item for item in (digest.get("topics") or []) if isinstance(item, dict)][:6]
+    cards_top, card_gap = top + 150, 12
+    card_w = (left_right - margin - 3 * card_gap) // 2
+    card_h = (upper_bottom - cards_top - 4 * card_gap) // 3
+    for index in range(6):
+        row, col = divmod(index, 2)
+        x = margin + card_gap + col * (card_w + card_gap)
+        y = cards_top + row * (card_h + card_gap)
+        topic = topics[index] if index < len(topics) else {"title": "今日留白", "summary": "今天暂时没有更多需要记录的话题。"}
+        _topic_card(image, draw, topic, images[index] if index < len(images) else None, (x, y, x + card_w, y + card_h), index + 1)
 
-    # 高密度彩色信息图布局：左侧话题卡，右侧人物与成就榜。
-    gutter = 36
-    left_width = 820
-    right_x = margin + left_width + gutter
-    right_width = width - margin - right_x
-    content_top = divider_y + 32
-    draw.rounded_rectangle(
-        (margin - 12, content_top - 12, margin + left_width + 12, height - 108),
-        radius=24, fill="#F8F5FF", outline="#CDC6F7", width=2,
-    )
+    rank_bottom = 554
+    _outlined_round_rect(draw, (right_left, top, width - margin, rank_bottom), 18, "#FFF9E3", ORANGE, width=3, shadow=False)
+    _section_header(draw, (right_left + 1, top + 1, width - margin - 1, top + 60), 2, "摸鱼大王评选", ORANGE)
+    rankings = [item for item in (digest.get("mvp_rankings") or []) if isinstance(item, dict)][:3]
+    if not rankings:
+        rankings = [digest.get("mvp") if isinstance(digest.get("mvp"), dict) else {}]
+    rank_gap = 10
+    rank_w = (width - margin - right_left - 4 * rank_gap) // 3
+    for index in range(3):
+        x = right_left + rank_gap + index * (rank_w + rank_gap)
+        item = rankings[index] if index < len(rankings) else {"name": "群友", "title": f"摸鱼第 {index + 1} 名", "reason": "今日低调在线。"}
+        image_index = 6 + index
+        sticker = images[image_index] if image_index < len(images) else (images[index] if index < len(images) else None)
+        _rank_card(image, draw, item, sticker, (x, top + 74, x + rank_w, rank_bottom - 12), index + 1)
 
-    topics = digest.get("topics") if isinstance(digest.get("topics"), list) else []
-    topics = [item for item in topics if isinstance(item, dict)][:10]
-    if not topics:
-        topics = [{"title": "今日重点", "summary": digest.get("overview", "暂无内容") }]
+    ach_top = rank_bottom + gap
+    _outlined_round_rect(draw, (right_left, ach_top, width - margin, upper_bottom), 18, "#F5F1FF", PURPLE, width=3, shadow=False)
+    _section_header(draw, (right_left + 1, ach_top + 1, width - margin - 1, ach_top + 60), 3, "趣味成就颁发", PURPLE)
+    achievements = [item for item in (digest.get("achievements") or []) if isinstance(item, dict)][:6]
+    ach_gap = 10
+    ach_w = (width - margin - right_left - 3 * ach_gap) // 2
+    ach_h = (upper_bottom - (ach_top + 72) - 4 * ach_gap) // 3
+    for index in range(6):
+        row, col = divmod(index, 2)
+        x = right_left + ach_gap + col * (ach_w + ach_gap)
+        y = ach_top + 72 + row * (ach_h + ach_gap)
+        item = achievements[index] if index < len(achievements) else {"award": "低调潜水奖", "name": "群友", "reason": "安静围观，也是一种稳定贡献。"}
+        image_index = 9 + (index % 3)
+        _achievement_card(image, draw, item, images[image_index] if image_index < len(images) else None, (x, y, x + ach_w, y + ach_h), index)
 
-    topic_gap = 16
-    topic_card_width = (left_width - topic_gap) // 2
-    topic_card_height = 338
-    for index, topic in enumerate(topics, start=1):
-        row, column = divmod(index - 1, 2)
-        card_x = margin + column * (topic_card_width + topic_gap)
-        card_y = content_top + row * (topic_card_height + topic_gap)
-        colors = (ACCENT, "#2F80ED", CYAN, "#F59E0B", PURPLE)
-        pales = ("#FFF0F2", "#EAF4FF", "#E9FBF7", "#FFF6DD", "#F0EDFF")
-        color = colors[(index - 1) % len(colors)]
-        pale = pales[(index - 1) % len(pales)]
-        draw.rounded_rectangle(
-            (card_x, card_y, card_x + topic_card_width,
-             card_y + topic_card_height),
-            radius=20, fill=pale, outline=color, width=3,
-        )
-        draw.ellipse(
-            (card_x + 16, card_y + 14, card_x + 62, card_y + 60), fill=color
-        )
-        draw.text(
-            (card_x + 39, card_y + 37), str(index),
-            font=_font(22, bold=True), fill="white", anchor="mm",
-        )
-        card_title_font = _font(22, bold=True)
-        title_lines = _wrap(
-            draw, topic.get("title") or f"重点 {index}",
-            card_title_font, topic_card_width - 88, 2,
-        )
-        _draw_lines(
-            draw, title_lines, (card_x + 74, card_y + 18),
-            card_title_font, color, 5,
-        )
-        illustration = topic_images[index - 1] if index <= len(topic_images) else None
-        text_x = card_x + 18
-        text_y = card_y + 78
-        text_width = topic_card_width - 36
-        if isinstance(illustration, Image.Image):
-            thumb_box = (
-                card_x + topic_card_width - 168,
-                card_y + topic_card_height - 156,
-                card_x + topic_card_width - 18,
-                card_y + topic_card_height - 18,
-            )
-            _paste_topic_image(image, illustration, thumb_box, color)
-            text_width = topic_card_width - 198
-        card_body_font = _font(18)
-        body_lines = _wrap(
-            draw,
-            topic.get("summary") or "",
-            card_body_font,
-            text_width,
-            8,
-        )
-        _draw_lines(draw, body_lines, (text_x, text_y), card_body_font, INK, 8)
+    bottom_top, bottom_bottom = 1108, 1508
+    widths = (520, 430, 540)
+    xs = (margin, margin + widths[0] + gap, margin + widths[0] + gap + widths[1] + gap)
+    specs = ((4, "群聊骚话提取", CYAN), (5, "明日话题展望", GREEN), ("★", "特别关注", PINK))
+    for x, section_w, spec in zip(xs, widths, specs):
+        _outlined_round_rect(draw, (x, bottom_top, x + section_w, bottom_bottom), 18, SECTION_PALES[1], spec[2], width=3, shadow=False)
+        _section_header(draw, (x + 1, bottom_top + 1, x + section_w - 1, bottom_top + 60), spec[0], spec[1], spec[2])
 
-    # MVP 卡片
-    right_y = content_top
-    mvp = digest.get("mvp") if isinstance(digest.get("mvp"), dict) else {}
-    mvp_name = _clean(mvp.get("name")) or "神秘群友"
-    mvp_title = _clean(mvp.get("title"))
-    reason_lines = _wrap(
-        draw, mvp.get("reason") or "今日份的存在感已经拉满。",
-        tiny_font, right_width - 48, 5,
-    )
-    mvp_card_height = max(300, 224 + len(reason_lines) * 29)
-    draw.rounded_rectangle(
-        (right_x + 8, right_y + 9,
-         right_x + right_width + 8, right_y + mvp_card_height + 9),
-        radius=20, fill="#D9D2C7",
-    )
-    draw.rounded_rectangle(
-        (right_x, right_y, right_x + right_width, right_y + mvp_card_height),
-        radius=20, fill=CARD, outline=PURPLE, width=3,
-    )
-    draw.text((right_x + 24, right_y + 22), "PERSON OF THE DAY", font=tiny_font, fill=ACCENT)
-    draw.text((right_x + 24, right_y + 58), "今日 MVP", font=sidebar_title, fill=INK)
-    draw.text((right_x + 24, right_y + 112), mvp_name, font=topic_font, fill=ACCENT)
-    _draw_sparkles(draw, right_x + right_width - 52, right_y + 48, color=SUN, scale=1.0)
-    if mvp_title:
-        title_lines = _wrap(draw, mvp_title, tiny_font, right_width - 48, 1)
-        _draw_lines(draw, title_lines, (right_x + 24, right_y + 154), tiny_font, MUTED, 8)
-    _draw_lines(draw, reason_lines, (right_x + 24, right_y + 194), tiny_font, INK, 10)
-    right_y += mvp_card_height + 34
+    quotes = [item for item in (digest.get("quotes") or []) if isinstance(item, dict)][:7]
+    if not quotes:
+        quotes = [digest.get("quote") if isinstance(digest.get("quote"), dict) else {}]
+    tomorrow = digest.get("tomorrow_topics") if isinstance(digest.get("tomorrow_topics"), list) else []
+    special = digest.get("special_notes") if isinstance(digest.get("special_notes"), list) else []
+    _numbered_list(draw, quotes, (xs[0] + 10, bottom_top + 72, xs[0] + widths[0] - 10, bottom_bottom - 12), CYAN, 7, quote_mode=True)
+    _numbered_list(draw, tomorrow, (xs[1] + 10, bottom_top + 72, xs[1] + widths[1] - 10, bottom_bottom - 12), GREEN, 5)
+    _numbered_list(draw, special, (xs[2] + 10, bottom_top + 72, xs[2] + widths[2] - 10, bottom_bottom - 12), PINK, 5)
 
-    # 趣味成就
-    draw.text((right_x, right_y), "趣味成就", font=sidebar_title, fill=INK)
-    draw.line((right_x, right_y + 48, right_x + right_width, right_y + 48), fill=CYAN, width=5)
-    right_y += 72
-    achievements = (
-        digest.get("achievements")
-        if isinstance(digest.get("achievements"), list)
-        else []
-    )
-    achievements = [item for item in achievements if isinstance(item, dict)][:10]
-    for achievement_index, achievement in enumerate(achievements):
-        award = _clean(achievement.get("award")) or "今日成就"
-        name = _clean(achievement.get("name")) or "群友"
-        bullet_color = (ACCENT, CYAN, PURPLE)[achievement_index % 3]
-        draw.ellipse((right_x, right_y + 7, right_x + 13, right_y + 20), fill=bullet_color)
-        title_lines = _wrap(
-            draw, f"{award} | {name}", tiny_font, right_width - 30, 2
-        )
-        right_y = _draw_lines(
-            draw, title_lines, (right_x + 28, right_y), tiny_font, INK, 8
-        )
-        reason_lines = _wrap(
-            draw, achievement.get("reason") or "", tiny_font, right_width - 28, 2
-        )
-        right_y = _draw_lines(
-            draw, reason_lines, (right_x + 28, right_y + 3), tiny_font, MUTED, 8
-        )
-        right_y += 13
-        if right_y > height - 780:
-            break
-
-    # 今日金句
-    quote = digest.get("quote") if isinstance(digest.get("quote"), dict) else {}
-    quote_y = right_y + 22
-    quote_bottom = min(quote_y + 220, height - 520)
-    draw.rounded_rectangle(
-        (right_x, quote_y, right_x + right_width, quote_bottom),
-        radius=18, fill="#FFF0D4", outline=ACCENT, width=3,
-    )
-    draw.text((right_x + 22, quote_y + 20), "今日金句", font=topic_font, fill=ACCENT)
-    quote_lines = _wrap(
-        draw,
-        "「" + _clean(quote.get("text") or "今天也是很有节目效果的一天。") + "」",
-        tiny_font,
-        right_width - 44,
-        4,
-    )
-    quote_text_y = _draw_lines(
-        draw, quote_lines, (right_x + 22, quote_y + 68), tiny_font, INK, 11
-    )
-    speaker = _clean(quote.get("speaker"))
-    if speaker:
-        speaker_lines = _wrap(draw, f"—— {speaker}", tiny_font, right_width - 44, 1)
-        _draw_lines(
-            draw,
-            speaker_lines,
-            (right_x + 22, min(quote_text_y + 18, quote_bottom - 42)),
-            tiny_font,
-            MUTED,
-            8,
-        )
-
-    # 页脚
-    if len(topic_images) > 1 and isinstance(topic_images[-1], Image.Image):
-        _paste_topic_image(
-            image, topic_images[-1],
-            (right_x + right_width - 76, quote_y + 14,
-             right_x + right_width - 16, quote_y + 74), ACCENT,
-        )
-
-    # 用同一批 AI 插画组成小型画报，填充侧栏并强化参考图的漫画感。
-    gallery_images = [item for item in topic_images[:4] if isinstance(item, Image.Image)]
-    gallery_y = quote_bottom + 30
-    if gallery_images and gallery_y < height - 250:
-        draw.text((right_x, gallery_y), "今日画报", font=sidebar_title, fill=INK)
-        draw.line(
-            (right_x, gallery_y + 46, right_x + right_width, gallery_y + 46),
-            fill=PURPLE, width=5,
-        )
-        gallery_y += 68
-        tile_gap = 12
-        tile_width = (right_width - tile_gap) // 2
-        available_height = height - 126 - gallery_y
-        tile_height = max(90, (available_height - tile_gap) // 2)
-        for gallery_index, illustration in enumerate(gallery_images):
-            gallery_row, gallery_column = divmod(gallery_index, 2)
-            tile_x = right_x + gallery_column * (tile_width + tile_gap)
-            tile_y = gallery_y + gallery_row * (tile_height + tile_gap)
-            _paste_topic_image(
-                image,
-                illustration,
-                (tile_x, tile_y, tile_x + tile_width, tile_y + tile_height),
-                (ACCENT, CYAN, PURPLE, "#F59E0B")[gallery_index],
-            )
-    draw.line((margin, height - 86, width - margin, height - 86), fill=RULE, width=3)
-    draw.text((margin, height - 66), "AI 提炼 · 本地排版 · 原文归属以聊天记录为准", font=tiny_font, fill=MUTED)
-    draw.text((width - margin, height - 66), "01", font=tiny_font, fill=ACCENT, anchor="ra")
+    draw.rectangle((0, 1518, width, height), fill=NAVY)
+    draw.text((width // 2, 1527), "—  生活很卷，但摸鱼很快乐  —", font=_font(15, True), fill=WHITE, anchor="ma")
 
     output = Path(output_path).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

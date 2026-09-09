@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw
 from topic_image_generator import (
     NVIDIA_IMAGE_ENDPOINT,
     build_contact_sheet_prompt,
+    build_digest_illustration_requests,
     generate_topic_images,
     split_contact_sheet,
 )
@@ -48,9 +49,20 @@ class TopicImageGeneratorTests(unittest.TestCase):
         self.assertIn("雪板选购", prompt)
 
     def test_split_contact_sheet_returns_requested_cells(self):
-        crops = split_contact_sheet(self._sheet(), 10)
-        self.assertEqual(len(crops), 10)
+        crops = split_contact_sheet(self._sheet(), 12)
+        self.assertEqual(len(crops), 12)
         self.assertEqual(crops[0].size, (100, 100))
+
+    def test_digest_always_builds_fixed_twelve_panel_sheet(self):
+        requests = build_digest_illustration_requests(
+            {
+                "topics": [{"visual_prompt": "snowboard trip"}],
+                "mvp_rankings": [{"visual_prompt": "winner portrait"}],
+            }
+        )
+        self.assertEqual(len(requests), 12)
+        self.assertEqual(requests[0]["visual_prompt"], "snowboard trip")
+        self.assertEqual(requests[6]["visual_prompt"], "winner portrait")
 
     def test_generate_topic_images_calls_nvidia_once(self):
         buffer = BytesIO()
@@ -73,6 +85,7 @@ class TopicImageGeneratorTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], NVIDIA_IMAGE_ENDPOINT)
+        self.assertEqual(calls[0][1]["json"]["height"], 768)
         self.assertEqual(len(images), 2)
 
 

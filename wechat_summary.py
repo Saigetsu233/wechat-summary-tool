@@ -1448,20 +1448,25 @@ NEWSPAPER_DIGEST_PROMPT = """\
   "topics": [
     {{"title": "话题短标题", "summary": "40～80字，说清起因、讨论或结果", "visual_prompt": "对应话题的简短英文插画描述"}}
   ],
-  "mvp": {{"name": "昵称", "title": "有趣但不冒犯的称号", "reason": "40～70字理由"}},
+  "mvp_rankings": [
+    {{"name": "昵称", "title": "有趣但不冒犯的称号", "reason": "30～50字理由", "visual_prompt": "对应人物气质的简短英文Q版肖像描述"}}
+  ],
   "achievements": [
     {{"award": "趣味成就名", "name": "昵称", "reason": "20～40字理由"}}
   ],
-  "quote": {{"speaker": "昵称", "text": "今日真实金句"}}
+  "quotes": [{{"speaker": "昵称", "text": "当天真实金句"}}],
+  "tomorrow_topics": ["根据今天内容判断、明天可能继续讨论的话题"],
+  "special_notes": ["值得提醒或特别关注的信息；无法确认时明确写可能或仅供娱乐"]
 }}
 
 要求：
-1. topics 选 5～10 个重要话题，achievements 选 5～10 个；内容不足时宁缺毋滥。
+1. 为保持固定版式：topics 最多 6 个，mvp_rankings 最多 3 人，achievements 最多 6 个，quotes 最多 7 条，tomorrow_topics 和 special_notes 各最多 5 条。
 2. 宁可少写也不要把字挤得过密，所有字段都要简短。
 3. 只能使用来源总结中已有的事实和发言人，不得杜撰。
 4. 不使用 emoji、网络链接或换行符，保持报纸杂志语气。
-5. 如果金句或 MVP 归属不确定，对应 name 使用“群友”，禁止猜测。
+5. 如果金句或人物归属不确定，对应 name 使用“群友”，禁止猜测；mvp_rankings 按今日存在感排序。
 6. visual_prompt 用英文描述一个有明确主体和动作的漫画画面，不含姓名、文字、数字、品牌或标志。
+7. tomorrow_topics 是基于当天尚未结束的话题作谨慎展望；special_notes 只写安全提醒、信息局限或需要继续确认的事情，不得把猜测写成事实。
 """
 
 
@@ -1490,7 +1495,7 @@ def _parse_json_object(value):
 def _normalise_newspaper_digest(data, group_name, date_range, message_count):
     topics = data.get("topics") if isinstance(data.get("topics"), list) else []
     clean_topics = []
-    for item in topics[:10]:
+    for item in topics[:6]:
         if not isinstance(item, dict):
             continue
         title = _short_text(item.get("title"), 18)
@@ -1504,14 +1509,33 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
                 }
             )
 
-    raw_mvp = data.get("mvp") if isinstance(data.get("mvp"), dict) else {}
+    raw_rankings = (
+        data.get("mvp_rankings")
+        if isinstance(data.get("mvp_rankings"), list)
+        else []
+    )
+    if not raw_rankings and isinstance(data.get("mvp"), dict):
+        raw_rankings = [data.get("mvp")]
+    rankings = []
+    for item in raw_rankings[:3]:
+        if not isinstance(item, dict):
+            continue
+        rankings.append(
+            {
+                "name": _short_text(item.get("name"), 12) or "群友",
+                "title": _short_text(item.get("title"), 14),
+                "reason": _short_text(item.get("reason"), 60),
+                "visual_prompt": _short_text(item.get("visual_prompt"), 120),
+            }
+        )
+    raw_mvp = rankings[0] if rankings else {}
     raw_achievements = (
         data.get("achievements")
         if isinstance(data.get("achievements"), list)
         else []
     )
     achievements = []
-    for item in raw_achievements[:10]:
+    for item in raw_achievements[:6]:
         if not isinstance(item, dict):
             continue
         achievements.append(
@@ -1521,7 +1545,31 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
                 "reason": _short_text(item.get("reason"), 52),
             }
         )
-    raw_quote = data.get("quote") if isinstance(data.get("quote"), dict) else {}
+    raw_quotes = data.get("quotes") if isinstance(data.get("quotes"), list) else []
+    if not raw_quotes and isinstance(data.get("quote"), dict):
+        raw_quotes = [data.get("quote")]
+    quotes = []
+    for item in raw_quotes[:7]:
+        if not isinstance(item, dict):
+            continue
+        text = _short_text(item.get("text"), 48)
+        if text:
+            quotes.append(
+                {
+                    "speaker": _short_text(item.get("speaker"), 10),
+                    "text": text,
+                }
+            )
+    tomorrow_topics = [
+        _short_text(item, 42)
+        for item in (data.get("tomorrow_topics") or [])[:5]
+        if _short_text(item, 42)
+    ] if isinstance(data.get("tomorrow_topics"), list) else []
+    special_notes = [
+        _short_text(item, 48)
+        for item in (data.get("special_notes") or [])[:5]
+        if _short_text(item, 48)
+    ] if isinstance(data.get("special_notes"), list) else []
 
     return {
         "date": _short_text(date_range, 32),
@@ -1535,11 +1583,12 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
             "title": _short_text(raw_mvp.get("title"), 20),
             "reason": _short_text(raw_mvp.get("reason"), 80),
         },
+        "mvp_rankings": rankings,
         "achievements": achievements,
-        "quote": {
-            "speaker": _short_text(raw_quote.get("speaker"), 16),
-            "text": _short_text(raw_quote.get("text"), 90),
-        },
+        "quote": quotes[0] if quotes else {"speaker": "", "text": ""},
+        "quotes": quotes,
+        "tomorrow_topics": tomorrow_topics,
+        "special_notes": special_notes,
     }
 
 

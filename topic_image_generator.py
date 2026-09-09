@@ -12,7 +12,7 @@ NVIDIA_IMAGE_ENDPOINT = (
 )
 CONTACT_SHEET_COLS = 4
 CONTACT_SHEET_ROWS = 3
-MAX_TOPIC_IMAGES = 10
+MAX_TOPIC_IMAGES = 12
 
 
 def _notify(callback, message):
@@ -23,10 +23,11 @@ def _notify(callback, message):
 def build_contact_sheet_prompt(topics):
     selected = topics[:MAX_TOPIC_IMAGES]
     prefix = (
-        "Twelve colorful cheerful cartoon sticker scenes arranged in four columns and "
-        "three rows, "
+        "Exact sheet of twelve separate crop-safe scenes arranged in four columns and three rows, "
+        "cute hand-drawn Chinese internet infographic style, expressive chibi characters, "
+        "thick slightly wobbly navy outlines, marker texture, pastel blue pink mint yellow, "
     )
-    suffix = ", cream background"
+    suffix = ", white background, empty speech bubbles, no text, no letters, no digits, no logos"
     available = max(24, (790 - len(prefix) - len(suffix)) // max(1, len(selected)) - 3)
     panels = []
     for topic in selected:
@@ -36,6 +37,41 @@ def build_contact_sheet_prompt(topics):
         subject = visual_prompt or f"{title}, {summary}"
         panels.append(subject[:available])
     return (prefix + ", ".join(panels) + suffix)[:800]
+
+
+def build_digest_illustration_requests(digest):
+    """固定生成 12 格素材：六个话题、三个人物、三张栏目装饰。"""
+    requests_list = []
+    topics = digest.get("topics") if isinstance(digest.get("topics"), list) else []
+    for topic in topics[:6]:
+        if isinstance(topic, dict):
+            requests_list.append(topic)
+    while len(requests_list) < 6:
+        requests_list.append(
+            {"visual_prompt": "friends happily chatting about everyday life"}
+        )
+
+    rankings = (
+        digest.get("mvp_rankings")
+        if isinstance(digest.get("mvp_rankings"), list)
+        else []
+    )
+    for index in range(3):
+        item = rankings[index] if index < len(rankings) and isinstance(rankings[index], dict) else {}
+        requests_list.append(
+            {
+                "visual_prompt": item.get("visual_prompt")
+                or "cheerful award winner portrait holding a small trophy"
+            }
+        )
+    requests_list.extend(
+        [
+            {"visual_prompt": "cute trophy and crown with joyful sparkles"},
+            {"visual_prompt": "cheerful person making an announcement with a megaphone"},
+            {"visual_prompt": "busy friendly group chat with colorful empty speech bubbles"},
+        ]
+    )
+    return requests_list[:MAX_TOPIC_IMAGES]
 
 
 def split_contact_sheet(image, count, cols=CONTACT_SHEET_COLS,
@@ -77,7 +113,7 @@ def _extract_image_bytes(response_data):
 
 def generate_topic_images(topics, api_key, progress_callback=None,
                           request_fn=requests.post):
-    """一次生成联系表并裁出最多十张话题插画。"""
+    """一次生成联系表并裁出最多十二张手绘插画。"""
     selected = [item for item in topics if isinstance(item, dict)][:MAX_TOPIC_IMAGES]
     if not selected:
         return []
@@ -87,7 +123,7 @@ def generate_topic_images(topics, api_key, progress_callback=None,
     _notify(progress_callback, f"正在让图片模型绘制 {len(selected)} 张话题插画...")
     payload = {
         "cfg_scale": 1,
-        "height": 1024,
+        "height": 768,
         "prompt": build_contact_sheet_prompt(selected),
         "samples": 1,
         "seed": 0,

@@ -50,7 +50,10 @@ from wechat_summary import (
     provider_label,
 )
 from newspaper_renderer import render_newspaper
-from topic_image_generator import generate_topic_images
+from topic_image_generator import (
+    build_digest_illustration_requests,
+    generate_topic_images,
+)
 
 
 APP_BG = "#F3F5FA"
@@ -942,8 +945,9 @@ class WeChatSummaryApp:
             )
             topic_images = []
             if use_ai_images:
+                illustration_requests = build_digest_illustration_requests(digest)
                 topic_images = generate_topic_images(
-                    digest.get("topics") or [],
+                    illustration_requests,
                     image_api_key,
                     progress_callback=self._set_status,
                 )

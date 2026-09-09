@@ -154,11 +154,17 @@ class AIProviderTests(unittest.TestCase):
             {"title": "第十话题", "summary": "日报现在支持更多重点。"},
             {"title": "多余话题", "summary": "第十一条应被裁掉。"}
           ],
-          "mvp": {"name": "阿雪", "title": "装备参谋", "reason": "整理了对比数据。"},
+          "mvp_rankings": [
+            {"name": "阿雪", "title": "装备参谋", "reason": "整理了对比数据。"},
+            {"name": "小明", "title": "行程管家", "reason": "确定了集合时间。"},
+            {"name": "小林", "title": "打蜡大师", "reason": "分享了保养经验。"}
+          ],
           "achievements": [
             {"award": "种草王", "name": "小明", "reason": "连发三个链接。"}
           ],
-          "quote": {"speaker": "阿雪", "text": "人可以不快，装备要帅。"}
+          "quotes": [{"speaker": "阿雪", "text": "人可以不快，装备要帅。"}],
+          "tomorrow_topics": ["继续确认周末天气"],
+          "special_notes": ["出发时间仍需群内确认"]
         }
         ```"""
 
@@ -173,8 +179,11 @@ class AIProviderTests(unittest.TestCase):
 
         self.assertEqual(digest["group_name"], "滑雪群")
         self.assertEqual(digest["message_count"], "564")
-        self.assertEqual(len(digest["topics"]), 10)
+        self.assertEqual(len(digest["topics"]), 6)
         self.assertEqual(digest["mvp"]["name"], "阿雪")
+        self.assertEqual(len(digest["mvp_rankings"]), 3)
+        self.assertEqual(digest["quotes"][0]["speaker"], "阿雪")
+        self.assertEqual(digest["tomorrow_topics"], ["继续确认周末天气"])
         self.assertEqual(chat.call_args.kwargs["provider"], "nvidia")
 
     def test_newspaper_renderer_creates_single_page_png(self):
