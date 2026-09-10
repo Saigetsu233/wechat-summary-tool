@@ -461,7 +461,7 @@ class WeChatSummaryApp:
         self.btn_cancel.grid(row=1, column=1, sticky="e", pady=(10, 0))
 
         text_shell = tk.Frame(
-            right, bg="#F8FAFC", highlightbackground=LINE,
+            right, bg="#F8FAFC", highlightbackground=BORDER,
             highlightthickness=1, bd=0,
         )
         text_shell.grid(row=2, column=0, sticky="nsew")
