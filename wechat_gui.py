@@ -74,6 +74,13 @@ def resource_path(filename):
     return os.path.join(base, filename)
 
 
+def _safe_filename_part(value, fallback="群聊"):
+    """把群名变成 Windows 文件名中的安全片段。"""
+    text = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", str(value or "")).strip()
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    return (text or fallback)[:60]
+
+
 class WeChatSummaryApp:
     def __init__(self, root):
         self.root = root
@@ -949,7 +956,10 @@ class WeChatSummaryApp:
         output_path = filedialog.asksaveasfilename(
             defaultextension=".png",
             filetypes=[("PNG 图片", "*.png")],
-            initialfile=f"群聊日报_{start_d:%Y%m%d}.png",
+            initialfile=(
+                f"{_safe_filename_part(self.chatrooms[idx][2].split('（')[0])}"
+                f"_群聊日报_{start_d:%Y%m%d}.png"
+            ),
             title="保存单页图片日报",
         )
         if not output_path:
