@@ -167,6 +167,10 @@ Key 的取用顺序是 `--key` > 环境变量 `GEMINI_API_KEY` > `config.json`�
 
 ![整图 AI 海报示例](docs/poster-example.jpg)
 
+本地排版模式（文字由程序绘制，零错字）：
+
+![单页图片日报示例](docs/newspaper-example.png)
+
 | 区域 | 说明 |
 |------|------|
 | 第一步：初始化 | 读取微信数据库，获取群聊列表 |
