@@ -49,6 +49,7 @@ from wechat_summary import (
     provider_default_model,
     provider_label,
 )
+import ui_theme as theme
 from newspaper_renderer import render_newspaper, save_poster_image
 from topic_image_generator import (
     GEMINI_IMAGE_MODEL,
@@ -75,15 +76,21 @@ def _illustration_mode_from_label(label):
     return "poster"
 
 
-APP_BG = "#F3F5FA"
-CARD_BG = "#FFFFFF"
-INK = "#172033"
-MUTED = "#6B7280"
-PRIMARY = "#6C5CE7"
-PRIMARY_DARK = "#5747D6"
-CYAN = "#00A8A8"
-NAVY = "#111827"
-BORDER = "#E4E8F0"
+APP_BG = theme.PAPER
+CARD_BG = theme.CARD
+INK = theme.INK
+MUTED = theme.MUTED
+PRIMARY = theme.BLUE
+PRIMARY_DARK = "#0F7AAD"
+CYAN = theme.CYAN
+NAVY = theme.NAVY
+NAVY_DARK = theme.NAVY_DARK
+BORDER = theme.LINE
+PINK = theme.PINK
+GREEN = theme.GREEN
+ORANGE = theme.ORANGE
+PURPLE = theme.PURPLE
+YELLOW = theme.YELLOW
 
 
 def resource_path(filename):
@@ -104,7 +111,7 @@ class WeChatSummaryApp:
         self.root = root
         self.root.title("群聊日报 · AI Digest")
         self.root.resizable(True, True)
-        self.root.minsize(980, 840)
+        self.root.minsize(1040, 900)
         self.root.configure(bg=APP_BG)
 
         # 后端状态
@@ -198,42 +205,62 @@ class WeChatSummaryApp:
     def _build_ui(self):
         self._configure_styles()
 
-        # 顶部品牌区
-        hero = tk.Frame(self.root, bg=NAVY, height=104)
+        # 顶部品牌区：深藏青圆角横幅，右边一只摸鱼猫
+        hero_wrap = tk.Frame(self.root, bg=APP_BG)
+        hero_wrap.pack(fill="x", padx=18, pady=(14, 4))
+        hero = tk.Canvas(hero_wrap, bg=APP_BG, highlightthickness=0, bd=0, height=108)
         hero.pack(fill="x")
-        hero.pack_propagate(False)
+
+        def _paint_hero(_event=None):
+            width = hero.winfo_width()
+            if width <= 1:
+                return
+            hero.delete("hero")
+            theme.round_rect(hero, 4, 6, width - 2, 104, 22,
+                             fill=theme.PAPER_DEEP, outline="", tags="hero")
+            theme.round_rect(hero, 2, 2, width - 4, 100, 22,
+                             fill=NAVY, outline=NAVY_DARK, width=2, tags="hero")
+            hero.tag_lower("hero")
+
+        hero.bind("<Configure>", _paint_hero)
+
+        self._icon_bubble = theme.to_photo(theme.chat_bubble(46, "#FFFFFF", NAVY))
+        tk.Label(hero, image=self._icon_bubble, bg=NAVY, bd=0).place(x=26, y=28)
         title_block = tk.Frame(hero, bg=NAVY)
-        title_block.pack(side="left", padx=28, pady=20)
-        tk.Label(
-            title_block, text="GROUP CHAT DIGEST", bg=NAVY, fg="#8B80FF",
-            font=("Segoe UI", 9, "bold"),
-        ).pack(anchor="w")
+        title_block.place(x=84, y=20)
         tk.Label(
             title_block, text="群聊日报", bg=NAVY, fg="white",
-            font=("微软雅黑", 24, "bold"),
-        ).pack(anchor="w", pady=(1, 0))
+            font=(self._fonts["display"], 25),
+        ).pack(anchor="w")
         tk.Label(
-            hero, text="把几百条消息，变成一分钟读完的今日头版  ✦",
-            bg=NAVY, fg="#C9D1E3", font=("微软雅黑", 10),
-        ).pack(side="right", padx=30)
+            title_block, text="—  把几百条消息，变成一分钟读完的今日头版  —",
+            bg=NAVY, fg="#C6D3E8", font=(self._fonts["body"], 9, "bold"),
+        ).pack(anchor="w", pady=(3, 0))
+
+        self._icon_cat = theme.to_photo(theme.cat_with_laptop(112))
+        tk.Label(hero, image=self._icon_cat, bg=NAVY, bd=0).place(
+            relx=1.0, x=-136, y=14
+        )
 
         workspace = ttk.Frame(self.root, style="App.TFrame", padding=(20, 18, 20, 14))
         workspace.pack(fill="both", expand=True)
-        workspace.columnconfigure(0, minsize=340, weight=0)
+        workspace.columnconfigure(0, minsize=362, weight=0)
         workspace.columnconfigure(1, weight=1)
         workspace.rowconfigure(0, weight=1)
 
         left = ttk.Frame(workspace, style="App.TFrame")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
-        right = ttk.Frame(workspace, style="Card.TFrame", padding=20)
-        right.grid(row=0, column=1, sticky="nsew")
+        right_card = theme.HandCard(workspace, accent=CYAN, stretch=True, pad=18)
+        right_card.grid(row=0, column=1, sticky="nsew")
+        right = right_card.body
         right.columnconfigure(0, weight=1)
         right.rowconfigure(2, weight=1)
 
         # 数据源卡片
-        source_card = ttk.Frame(left, style="Card.TFrame", padding=16)
-        source_card.pack(fill="x", pady=(0, 12))
-        self._card_heading(source_card, "01", "连接微信", "微信保持登录状态")
+        source_holder = theme.HandCard(left, accent=PRIMARY, pad=13)
+        source_holder.pack(fill="x", pady=(0, 12))
+        source_card = source_holder.body
+        self._card_heading(source_card, "1", "连接微信", "微信保持登录状态", PRIMARY)
         init_row = ttk.Frame(source_card, style="Card.TFrame")
         init_row.pack(fill="x", pady=(12, 8))
         self.btn_init = ttk.Button(
@@ -247,21 +274,23 @@ class WeChatSummaryApp:
         )
         self.btn_manual.pack(side="left", padx=(8, 0))
         self.progress = ttk.Progressbar(
-            source_card, mode="indeterminate", style="Accent.Horizontal.TProgressbar"
+            source_card, mode="determinate", value=0,
+            style="Accent.Horizontal.TProgressbar",
         )
-        self.progress.pack(fill="x", pady=(1, 8))
+        self.progress.pack(fill="x", pady=(9, 7))
         self.path_label = ttk.Label(
             source_card, text="尚未连接，将自动检测微信数据目录",
-            style="Hint.TLabel", wraplength=300, justify="left",
+            style="Hint.TLabel", wraplength=286, justify="left",
         )
         self.path_label.pack(anchor="w")
 
         # 内容范围卡片
-        range_card = ttk.Frame(left, style="Card.TFrame", padding=16)
-        range_card.pack(fill="x", pady=(0, 12))
-        self._card_heading(range_card, "02", "选择内容", "群聊与日期范围")
+        range_holder = theme.HandCard(left, accent=PINK, pad=13)
+        range_holder.pack(fill="x", pady=(0, 12))
+        range_card = range_holder.body
+        self._card_heading(range_card, "2", "选择内容", "群聊与日期范围", PINK)
         ttk.Label(range_card, text="群聊", style="FieldLabel.TLabel").pack(
-            anchor="w", pady=(12, 5)
+            anchor="w", pady=(10, 4)
         )
         self.chatroom_var = tk.StringVar()
         self.chatroom_combo = ttk.Combobox(
@@ -293,11 +322,12 @@ class WeChatSummaryApp:
         self.end_date.grid(row=1, column=1, sticky="ew", padx=(5, 0), pady=(5, 0))
 
         # AI 服务卡片
-        self.api_frame = ttk.Frame(left, style="Card.TFrame", padding=16)
-        self.api_frame.pack(fill="x")
-        self._card_heading(self.api_frame, "03", "AI 引擎", "选择服务与模型")
+        api_holder = theme.HandCard(left, accent=PURPLE, pad=13)
+        api_holder.pack(fill="x")
+        self.api_frame = api_holder.body
+        self._card_heading(self.api_frame, "3", "AI 引擎", "选择服务与模型", PURPLE)
         ttk.Label(self.api_frame, text="服务商", style="FieldLabel.TLabel").pack(
-            anchor="w", pady=(12, 5)
+            anchor="w", pady=(10, 4)
         )
         self.provider_combo = ttk.Combobox(
             self.api_frame, textvariable=self.provider_var,
@@ -307,14 +337,14 @@ class WeChatSummaryApp:
         self.provider_combo.pack(fill="x")
         self.provider_combo.bind("<<ComboboxSelected>>", self._on_provider_changed)
         ttk.Label(self.api_frame, text="模型", style="FieldLabel.TLabel").pack(
-            anchor="w", pady=(10, 5)
+            anchor="w", pady=(9, 4)
         )
         self.model_entry = ttk.Entry(
             self.api_frame, textvariable=self.model_var, style="Modern.TEntry"
         )
         self.model_entry.pack(fill="x")
         ttk.Label(self.api_frame, text="API Key", style="FieldLabel.TLabel").pack(
-            anchor="w", pady=(10, 5)
+            anchor="w", pady=(9, 4)
         )
         api_row = ttk.Frame(self.api_frame, style="Card.TFrame")
         api_row.pack(fill="x")
@@ -334,36 +364,25 @@ class WeChatSummaryApp:
                 if self.current_provider == "gemini"
                 else "Key 仅保存在本机；图片日报配图使用单独保存的 Gemini Key"
             ),
-            style="Hint.TLabel", wraplength=300,
+            style="Hint.TLabel", wraplength=286,
         )
-        self.key_hint_label.pack(anchor="w", pady=(9, 0))
-        ttk.Label(self.api_frame, text="图片模型", style="FieldLabel.TLabel").pack(
-            anchor="w", pady=(10, 5)
-        )
-        self.image_model_combo = ttk.Combobox(
-            self.api_frame,
-            textvariable=self.image_model_var,
-            values=(
-                "gemini-3.1-flash-image",
-                "gemini-3-pro-image",
-            ),
-            state="readonly",
-            style="Modern.TCombobox",
-        )
-        self.image_model_combo.pack(fill="x")
-        ttk.Label(
-            self.api_frame,
-            text="Flash 更快更省；Pro 的手绘细节更强、费用更高。",
-            style="Hint.TLabel", wraplength=300,
-        ).pack(anchor="w", pady=(7, 0))
-
+        self.key_hint_label.pack(anchor="w", pady=(7, 0))
         # 右侧总结工作区
         header_row = ttk.Frame(right, style="Card.TFrame")
         header_row.grid(row=0, column=0, sticky="ew")
         header_row.columnconfigure(0, weight=1)
         title_area = ttk.Frame(header_row, style="Card.TFrame")
         title_area.grid(row=0, column=0, sticky="w")
-        ttk.Label(title_area, text="今日总结", style="PanelTitle.TLabel").pack(anchor="w")
+        title_line = tk.Frame(title_area, bg=CARD_BG)
+        title_line.pack(anchor="w")
+        tk.Label(
+            title_line, text="今日总结", bg=CARD_BG, fg=INK,
+            font=(self._fonts["round"], 17, "bold"),
+        ).pack(side="left")
+        self._icon_title_star = theme.to_photo(theme.sparkle(19, YELLOW))
+        tk.Label(title_line, image=self._icon_title_star, bg=CARD_BG, bd=0).pack(
+            side="left", padx=(7, 0), pady=(4, 0)
+        )
         self.msg_count_label = ttk.Label(title_area, text="等待选择群聊", style="Hint.TLabel")
         self.msg_count_label.pack(anchor="w", pady=(3, 0))
         self.btn_edit_prompt = ttk.Button(
@@ -376,18 +395,18 @@ class WeChatSummaryApp:
         action_row.grid(row=1, column=0, sticky="ew", pady=(18, 14))
         action_row.columnconfigure((0, 1), weight=1)
         self.btn_summarize = ttk.Button(
-            action_row, text="✨ 生成文字总结", command=self._on_summarize_click,
-            state="disabled", style="Primary.TButton",
+            action_row, text="生成文字总结", command=self._on_summarize_click,
+            state="disabled", style="Teal.TButton",
         )
         self.btn_summarize.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.btn_image = ttk.Button(
-            action_row, text="📰 生成图片日报", command=self._on_image_click,
-            state="disabled", style="Teal.TButton",
+            action_row, text="生成图片日报", command=self._on_image_click,
+            state="disabled", style="Pink.TButton",
         )
         self.btn_image.grid(row=0, column=1, sticky="ew", padx=(6, 0))
         self.ai_images_check = ttk.Checkbutton(
             action_row,
-            text="使用 Gemini 图片模型生成话题插画（整页只调用 1 次）",
+            text="启用 AI 插画（关掉就只输出纯本地排版，不调用图片接口）",
             variable=self.ai_topic_images_var,
             style="Modern.TCheckbutton",
         )
@@ -407,12 +426,29 @@ class WeChatSummaryApp:
         self.illustration_mode_combo.bind(
             "<<ComboboxSelected>>", self._on_illustration_mode_change
         )
+        model_row = ttk.Frame(action_row, style="Card.TFrame")
+        model_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(model_row, text="图片模型", style="FieldLabel.TLabel").pack(
+            side="left", padx=(0, 8)
+        )
+        self.image_model_combo = ttk.Combobox(
+            model_row,
+            textvariable=self.image_model_var,
+            values=(
+                "gemini-3.1-flash-image",
+                "gemini-3-pro-image",
+            ),
+            state="readonly",
+            style="Modern.TCombobox",
+            width=24,
+        )
+        self.image_model_combo.pack(side="left")
         ttk.Label(
             action_row,
-            text="整图模式请把图片模型选成 gemini-3-pro-image；它会自己画字，"
-                 "偶尔会写错字或漏字，重跑一次即可换一版。",
-            style="Hint.TLabel", wraplength=520,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            text="整图模式会自己写中文，必须用 Pro 图片模型；偶尔会写错字，"
+                 "重跑一次即可换一版。Flash 只用于本地排版模式的无字插画。",
+            style="Hint.TLabel", wraplength=560,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(7, 0))
         self.btn_cancel = ttk.Button(
             action_row,
             text="取消任务",
@@ -423,17 +459,18 @@ class WeChatSummaryApp:
         self.btn_cancel.grid(row=1, column=1, sticky="e", pady=(10, 0))
 
         text_shell = tk.Frame(
-            right, bg="#FAFBFD", highlightbackground=BORDER,
-            highlightthickness=1, bd=0,
+            right, bg=theme.PAPER, highlightbackground=GREEN,
+            highlightthickness=2, bd=0,
         )
         text_shell.grid(row=2, column=0, sticky="nsew")
         self.result_text = scrolledtext.ScrolledText(
             text_shell, wrap="word", state="disabled", bd=0,
-            relief="flat", bg="#FAFBFD", fg=INK, insertbackground=PRIMARY,
+            relief="flat", bg=theme.PAPER, fg=INK, insertbackground=PRIMARY,
             selectbackground="#DCD8FF", font=("微软雅黑", 10),
             padx=16, pady=14, spacing1=2, spacing3=5,
         )
         self.result_text.pack(fill="both", expand=True)
+        self._show_result_placeholder()
 
         btn_result_row = ttk.Frame(right, style="Card.TFrame")
         btn_result_row.grid(row=3, column=0, sticky="e", pady=(13, 0))
@@ -450,12 +487,16 @@ class WeChatSummaryApp:
 
         self.status_var = tk.StringVar(value="就绪 · 请先连接微信")
         status_bar = tk.Label(
-            self.root, textvariable=self.status_var, bg="#E9ECF4", fg=MUTED,
-            anchor="w", padx=22, pady=7, font=("微软雅黑", 9),
+            self.root, textvariable=self.status_var, bg=theme.PAPER_DEEP, fg=INK,
+            anchor="w", padx=22, pady=8,
+            font=(self._fonts["body"], 9, "bold"),
         )
         status_bar.pack(fill="x", side="bottom")
 
     def _configure_styles(self):
+        self._fonts = theme.fonts(self.root)
+        body = self._fonts["body"]
+        round_face = self._fonts["round"]
         style = ttk.Style(self.root)
         try:
             style.theme_use("clam")
@@ -464,57 +505,96 @@ class WeChatSummaryApp:
         style.configure("App.TFrame", background=APP_BG)
         style.configure("Card.TFrame", background=CARD_BG)
         style.configure("TLabel", background=CARD_BG, foreground=INK,
-                        font=("微软雅黑", 9))
+                        font=(body, 9))
         style.configure("Hint.TLabel", background=CARD_BG, foreground=MUTED,
-                        font=("微软雅黑", 8))
-        style.configure("FieldLabel.TLabel", background=CARD_BG, foreground="#4B5563",
-                        font=("微软雅黑", 9, "bold"))
+                        font=(body, 8))
+        style.configure("FieldLabel.TLabel", background=CARD_BG, foreground=INK,
+                        font=(body, 9, "bold"))
         style.configure("PanelTitle.TLabel", background=CARD_BG, foreground=INK,
-                        font=("微软雅黑", 18, "bold"))
-        style.configure("Step.TLabel", background=PRIMARY, foreground="white",
-                        padding=(7, 3), font=("Segoe UI", 8, "bold"))
+                        font=(round_face, 17, "bold"))
         style.configure("CardTitle.TLabel", background=CARD_BG, foreground=INK,
-                        font=("微软雅黑", 12, "bold"))
-        style.configure("Primary.TButton", background=PRIMARY, foreground="white",
-                        borderwidth=0, padding=(14, 10), font=("微软雅黑", 9, "bold"))
-        style.map("Primary.TButton", background=[("active", PRIMARY_DARK),
-                                                  ("disabled", "#C7C2EE")])
-        style.configure("Teal.TButton", background=CYAN, foreground="white",
-                        borderwidth=0, padding=(14, 10), font=("微软雅黑", 9, "bold"))
-        style.map("Teal.TButton", background=[("active", "#008F8F"),
-                                               ("disabled", "#A7D8D8")])
-        style.configure("Soft.TButton", background="#EEF0F6", foreground=INK,
-                        borderwidth=0, padding=(10, 7), font=("微软雅黑", 9))
-        style.map("Soft.TButton", background=[("active", "#E1E4ED")])
-        style.configure("Modern.TEntry", fieldbackground="#F8F9FC",
+                        font=(round_face, 12, "bold"))
+
+        # 按钮：粗体圆润字 + 海报同款彩色，按下去还会压深一档
+        def pill(name, fill, active, disabled, fg="white", pad=(16, 11)):
+            style.configure(name, background=fill, foreground=fg, borderwidth=0,
+                            focusthickness=0, padding=pad,
+                            font=(round_face, 10, "bold"))
+            style.map(name,
+                      background=[("pressed", active), ("active", active),
+                                  ("disabled", disabled)],
+                      foreground=[("disabled", "#6C7A8A")])
+
+        pill("Primary.TButton", PRIMARY, PRIMARY_DARK, "#A9D3E8")
+        pill("Teal.TButton", CYAN, "#06909F", "#A6E0E6")
+        pill("Pink.TButton", PINK, "#D33A63", "#F5AEC1")
+        style.configure("Soft.TButton", background=theme.PAPER_DEEP, foreground=INK,
+                        borderwidth=0, padding=(12, 8), font=(body, 9, "bold"))
+        style.map("Soft.TButton",
+                  background=[("pressed", "#E7DEC9"), ("active", "#EFE7D5"),
+                              ("disabled", "#F4F0E6")],
+                  foreground=[("disabled", MUTED)])
+
+        style.configure("Modern.TEntry", fieldbackground=theme.PAPER,
                         foreground=INK, bordercolor=BORDER, lightcolor=BORDER,
-                        darkcolor=BORDER, padding=7)
-        style.configure("Modern.TCombobox", fieldbackground="#F8F9FC",
-                        background="#F8F9FC", foreground=INK,
+                        darkcolor=BORDER, borderwidth=2, padding=8)
+        style.map("Modern.TEntry", bordercolor=[("focus", PRIMARY)])
+        style.configure("Modern.TCombobox", fieldbackground=theme.PAPER,
+                        background=theme.PAPER, foreground=INK,
                         bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER,
-                        arrowsize=14, padding=6)
-        style.map("Modern.TCombobox", fieldbackground=[("readonly", "#F8F9FC")],
-                  selectbackground=[("readonly", "#F8F9FC")],
+                        borderwidth=2, arrowsize=15, padding=7,
+                        arrowcolor=PRIMARY)
+        style.map("Modern.TCombobox",
+                  fieldbackground=[("readonly", theme.PAPER)],
+                  bordercolor=[("focus", PRIMARY)],
+                  selectbackground=[("readonly", theme.PAPER)],
                   selectforeground=[("readonly", INK)])
-        style.configure("Accent.Horizontal.TProgressbar", background=PRIMARY,
-                        troughcolor="#ECEAFB", bordercolor=CARD_BG,
-                        lightcolor=PRIMARY, darkcolor=PRIMARY, thickness=5)
-        style.configure("Modern.TCheckbutton", background=CARD_BG, foreground=MUTED,
-                        font=("微软雅黑", 9), padding=(0, 2))
-        style.map("Modern.TCheckbutton", background=[("active", CARD_BG)])
+        style.configure("Accent.Horizontal.TProgressbar", background=YELLOW,
+                        troughcolor=theme.PAPER_DEEP, bordercolor=CARD_BG,
+                        lightcolor=YELLOW, darkcolor=YELLOW, thickness=7)
+        style.configure("Modern.TCheckbutton", background=CARD_BG, foreground=INK,
+                        font=(body, 9), padding=(0, 3),
+                        indicatorcolor=theme.PAPER)
+        style.map("Modern.TCheckbutton",
+                  background=[("active", CARD_BG)],
+                  indicatorcolor=[("selected", GREEN), ("pressed", GREEN)])
 
-    def _card_heading(self, parent, number, title, subtitle):
-        row = ttk.Frame(parent, style="Card.TFrame")
+    def _card_heading(self, parent, number, title, subtitle, accent=None):
+        """卡片标题：手绘序号贴纸 + 圆润标题 + 灰色副标题。"""
+        accent = accent or PRIMARY
+        row = tk.Frame(parent, bg=CARD_BG)
         row.pack(fill="x")
-        ttk.Label(row, text=number, style="Step.TLabel").pack(side="left")
-        text = ttk.Frame(row, style="Card.TFrame")
+        badge = theme.to_photo(theme.step_badge(number, accent, 36))
+        if not hasattr(self, "_badge_images"):
+            self._badge_images = []
+        self._badge_images.append(badge)
+        tk.Label(row, image=badge, bg=CARD_BG, bd=0).pack(side="left")
+        text = tk.Frame(row, bg=CARD_BG)
         text.pack(side="left", padx=(10, 0))
-        ttk.Label(text, text=title, style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(text, text=subtitle, style="Hint.TLabel").pack(anchor="w")
+        tk.Label(
+            text, text=title, bg=CARD_BG, fg=INK,
+            font=(self._fonts["round"], 12, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            text, text=subtitle, bg=CARD_BG, fg=MUTED,
+            font=(self._fonts["body"], 8),
+        ).pack(anchor="w")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # 工具方法
-    # ─────────────────────────────────────────────────────────────────────────
+    def _show_result_placeholder(self):
+        """空状态：放一只趴着的小猫，别让右边一片空白。"""
+        self._placeholder_cat = theme.to_photo(theme.cat_head(84))
+        self.result_text.config(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.tag_configure("center", justify="center")
+        self.result_text.insert("end", "\n\n\n")
+        self.result_text.image_create("end", image=self._placeholder_cat)
+        self.result_text.insert(
+            "end",
+            "\n\n还没有总结\n先连接微信，选好群聊和日期，再点上面的按钮\n",
+            "center",
+        )
+        self.result_text.tag_add("center", "1.0", "end")
+        self.result_text.config(state="disabled")
 
     def _set_status(self, msg, color="black"):
         self.root.after(0, lambda: self.status_var.set(msg))
@@ -536,10 +616,16 @@ class WeChatSummaryApp:
         self._set_status("正在取消任务；当前网络请求结束后立即停止...")
 
     def _set_progress(self, running: bool):
-        if running:
-            self.root.after(0, self.progress.start)
-        else:
-            self.root.after(0, self.progress.stop)
+        def _do():
+            if running:
+                self.progress.configure(mode="indeterminate")
+                self.progress.start()
+            else:
+                self.progress.stop()
+                # 停下来时切成 0 值的确定模式，免得留一截黄条像出错
+                self.progress.configure(mode="determinate", value=0)
+
+        self.root.after(0, _do)
 
     def _set_ui_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"

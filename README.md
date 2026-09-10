@@ -10,7 +10,7 @@
 - **选择群聊和时间范围**：支持任意群聊，自由选择开始和结束日期
 - **跨分库读取**：自动合并 `message_0.db`、`message_1.db` 等全部消息分片，近期与历史消息不会漏读
 - **准确识别发言人**：通过消息表的发送者 ID 与联系人数据库匹配备注名/昵称，避免把被提及者误认为发言人
-- **AI 智能总结**：默认使用 Google Gemini，也兼容 DeepSeek 官方 API 和 NVIDIA API Catalog
+- **AI 智能总结**：默认使用 Google Gemini，也兼容 DeepSeek 官方 API
 - **Gemini 3.8**：文字总结默认使用 `gemini-3.8-flash`，兼顾长上下文、速度和结构化输出
 - **长记录不截断**：聊天内容自动分段提炼并汇总，避免只总结最后一部分
 - **长群聊续跑**：按约 2.4 万字符分段处理并缓存已完成结果；中途失败后再次生成可从本机缓存继续
@@ -18,7 +18,7 @@
 - **整图 AI 海报**：把整份日报文案交给 `gemini-3-pro-image` 一次画完 `4096×4096`，含中文标题、卡片、对白气泡和吉祥物，最接近精致手绘风格
 - **固定手绘日报模板**：备用的本地排版路线，复刻蓝色报头、粗描边彩色分区、话题宫格、人物榜、趣味成就和底部三栏，固定输出 `1536×1536`
 - **AI 话题配图**：本地排版模式下由 Gemini 图片模型生成手绘漫画素材，再裁成栏目插画
-- **现代桌面界面**：卡片式双栏工作台，数据、模型与结果一屏完成
+- **手绘风桌面界面**：与日报同一套配色的圆角卡片工作台，图标由 Pillow 现画，无外部素材
 - **免 Python 运行**：Windows EXE 可直接双击使用
 - **任务可取消**：生成途中可点“取消任务”，当前网络请求结束后立即停止后续步骤
 - **自动管理临时空间**：系统盘空间不足时自动改用程序所在盘存放解密临时文件，退出时清理
@@ -31,13 +31,17 @@
 
 - Windows 系统（仅支持 Windows）
 - 微信电脑版 4.0 / 4.1 已安装并**保持登录状态**（已适配 4.1 新密钥结构）
-- 推荐拥有已启用结算的 [Google AI Studio API Key](https://aistudio.google.com/apikey)；也可使用 DeepSeek 或 NVIDIA API Key
+- 推荐拥有已启用结算的 [Google AI Studio API Key](https://aistudio.google.com/apikey)；也可使用 DeepSeek API Key
 
 ---
 
-## 安装方法（推荐）
+## 下载
 
-从项目 Release 下载 `ChatroomDigest.exe`，无需安装 Python，双击即可启动。
+前往 **[Releases 页面](https://github.com/Saigetsu233/wechat-summary-tool/releases/latest)**
+下载最新的 `ChatroomDigest.exe`，无需安装 Python，双击即可启动。
+
+首次启动后在左侧填入 API Key 并保存，Key 只写在本机的 `config.json` 里。
+想从源码运行见下方「从源码运行」。
 
 ## 从源码运行
 
@@ -68,21 +72,13 @@ pip install -r requirements.txt
 
 Gemini API 属于按量计费服务，请先在对应 Google Cloud 项目启用结算并检查配额。Key 只保存在本机 `config.json` 中；该文件已加入 `.gitignore`，请勿提交或分享。
 
-DeepSeek 官方和 NVIDIA API Catalog 仍作为兼容选项保留。切换服务商时，程序会自动切换到该服务商独立保存的 Key 与模型名。
+DeepSeek 官方接口仍作为兼容选项保留。切换服务商时，程序会自动切换到该服务商独立保存的 Key 与模型名。
 
 > 仓库中的 `config.example.json` 仅作格式示例，不包含真实凭据。
 
-#### NVIDIA 免费接口
-
-1. 登录 [NVIDIA API Catalog](https://build.nvidia.com/)，打开带 **Free Endpoint** 的文本模型。
-2. 点击模型页的 **Generate API Key**。
-3. 在工具中选择“NVIDIA API Catalog”并粘贴 Key。
-
-默认模型为更适合长文本摘要的 `deepseek-ai/deepseek-v4-flash-0731`。旧版本保存的默认 Pro 模型会自动迁移为 Flash；用户手动填写的其他模型不会被修改。模型名可以直接编辑；如果 NVIDIA 返回模型不存在，请从当前模型页复制最新的 `model` 值。免费模型、频率、额度和可用性可能变化，以 NVIDIA 页面当时显示为准。
-
 长聊天会按约 2.4 万字符分段处理。每一段完成后只在本机缓存 AI 的提炼结果（不缓存聊天原文），如果后续请求超时，再次生成会从已完成的段落继续。源码版缓存位于项目的 `.summary_cache`，EXE 版位于 `%LOCALAPPDATA%\ChatroomDigest\.summary_cache`。
 
-NVIDIA 免费端点高负载时可能变慢。单次请求最多等待 120 秒且不再静默长时间重试；每个阶段和分段进度会直接显示在主面板。
+每个阶段和分段进度会直接显示在主面板。
 
 ### 第二步：运行工具
 
@@ -129,7 +125,7 @@ python wechat_gui.py
 
 **整图模式的已知限制**：整页约七百个汉字里，通常会有一到三个多笔画字被写成形近的错字（大字号的标题、要点、金句基本无误，出错集中在中等字号的成就说明一类）。这是模型书写中文的固有局限，不满意就重跑一次换一版；要文字零差错就用本地排版模式。
 
-整图模式若失败（额度、审核或没返回图片），程序会自动退回本地排版版本并弹窗说明，日报内容不会丢。两条本地排版路线的中文都由程序绘制，不会出现 AI 图片常见的中文乱码。配图使用 Gemini API Key：如果文字总结也选择 Gemini，就会直接共用当前 Key；如果文字选择 DeepSeek/NVIDIA，则需要先在 Gemini 服务项中保存一次 Key。关闭“AI 话题插画”后不会调用图片接口，直接输出纯本地排版。如果刚刚已生成同一群、同一日期的文字总结，图片功能会直接复用，避免重复总结。
+整图模式若失败（额度、审核或没返回图片），程序会自动退回本地排版版本并弹窗说明，日报内容不会丢。两条本地排版路线的中文都由程序绘制，不会出现 AI 图片常见的中文乱码。配图使用 Gemini API Key：如果文字总结也选择 Gemini，就会直接共用当前 Key；如果文字选择 DeepSeek，则需要先在 Gemini 服务项中保存一次 Key。关闭“AI 话题插画”后不会调用图片接口，直接输出纯本地排版。如果刚刚已生成同一群、同一日期的文字总结，图片功能会直接复用，避免重复总结。
 
 ### 不碰微信数据也能验证出图
 
@@ -165,13 +161,11 @@ Key 的取用顺序是 `--key` > 环境变量 `GEMINI_API_KEY` > `config.json`�
 
 ## 界面说明
 
+![桌面界面](docs/ui-example.jpg)
+
 整图 AI 海报模式（默认，`gemini-3-pro-image` 一次画完，示例已缩图）：
 
 ![整图 AI 海报示例](docs/poster-example.jpg)
-
-本地排版模式（文字由程序绘制，零错字）：
-
-![单页图片日报示例](docs/newspaper-example.png)
 
 | 区域 | 说明 |
 |------|------|
@@ -179,7 +173,8 @@ Key 的取用顺序是 `--key` > 环境变量 `GEMINI_API_KEY` > `config.json`�
 | 第二步：选择群聊 | 从下拉框选择要总结的群 |
 | 第三步：时间范围 | 选择起止日期 |
 | 生成总结 | 调用 AI 生成摘要 |
-| 第四步：AI 服务 | 默认选择 Gemini 3.8；也可切换 DeepSeek 或 NVIDIA，并编辑模型名 |
+| 第四步：AI 服务 | 默认选择 Gemini 3.8；也可切换 DeepSeek，并编辑模型名 |
+| 插画模式 | 在「生成图片日报」下方选画法，并挑选对应的图片模型 |
 | 生成图片日报 | 输出单张方形信息图 PNG：整图 AI 海报或本地手绘模板 |
 
 ---
@@ -194,16 +189,13 @@ A：新版已兼容微信 4.1 的 `Config.Cipher` 密钥结构。请确保微信
 A：点击「手动选择文件夹」。在微信电脑版 → 设置 → 文件管理，找到"微信文件的存储位置"，进入该目录，选中形如 `wxid_xxxxxxxx` 的文件夹。
 
 **Q：API Key 从哪里获取？**  
-A：Gemini Key 在 [Google AI Studio](https://aistudio.google.com/apikey) 创建；DeepSeek Key 在 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 创建；NVIDIA Key 在 [NVIDIA API Catalog](https://build.nvidia.com/) 的模型页创建。
+A：Gemini Key 在 [Google AI Studio](https://aistudio.google.com/apikey) 创建；DeepSeek Key 在 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 创建。
 
 **Q：DeepSeek 提示 402 余额不足怎么办？**
 A：可以充值，或在界面中直接切换到 Google Gemini。工具会对常见鉴权、余额、配额和服务繁忙错误给出中文提示。
 
 **Q：为什么文字模型和图片模型不是同一个？**
 A：`gemini-3.8-flash` 用于理解聊天和生成结构化日报内容；`gemini-3-pro-image` 用于整图 AI 海报（自己写中文），`gemini-3.1-flash-image` 用于本地排版模式下的无文字插画。程序自动分工，共用一个 Gemini API Key。
-
-**Q：NVIDIA 提示 `Read timed out`怎么办？**
-A：这表示已经连上 NVIDIA，但模型在 120 秒内没有返回完整结果，通常不是 Key 错误。请稍后重试，或换用其他 Free Endpoint 模型。
 
 **Q：API Key 会泄露吗？**  
 A：Key 只明文保存在你本机且已被 Git 忽略的 `config.json` 中，不会上传到本项目仓库；生成总结时，程序会将当前 Key 作为身份凭证发送给你选择的 API。
@@ -216,7 +208,7 @@ A：暂不支持，目前只能总结群聊记录。
 ## 注意事项
 
 - 本工具通过读取本地微信数据库工作，**不会登录你的微信账号**，也不会发送任何消息
-- 生成 AI 总结时，所选时间范围内的文本消息会发送给你选择的 Gemini、DeepSeek 或 NVIDIA API，请确认群成员同意并遵守当地隐私法规
+- 生成 AI 总结时，所选时间范围内的文本消息会发送给你选择的 Gemini 或 DeepSeek API，请确认群成员同意并遵守当地隐私法规
 - 仅支持 Windows 微信 4.0 / 4.1 版本；微信后续若再次调整内部数据库结构，可能需要同步升级提取器
 - 请勿将本工具用于非法用途
 
@@ -228,9 +220,9 @@ A：暂不支持，目前只能总结群聊记录。
 |----|------|
 | tkcalendar | 日期选择控件 |
 | pycryptodome | 解密微信数据库 |
-| requests | 调用 Gemini / DeepSeek / NVIDIA API |
+| requests | 调用 Gemini / DeepSeek API |
 | psutil | 自动定位微信数据目录 |
-| Pillow | 本地渲染报纸杂志风 PNG |
+| Pillow | 本地渲染报纸杂志风 PNG，并绘制界面图标 |
 
 ---
 
