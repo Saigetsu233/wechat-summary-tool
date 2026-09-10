@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
-"""使用 NVIDIA 图片模型为日报话题生成一张可切分的插画板。"""
+"""使用 Gemini 或兼容的旧 NVIDIA 图片端点生成可切分的插画板。"""
 
 import base64
 from io import BytesIO
+import time
+from urllib.parse import quote
 from PIL import Image
 import requests
 
 
+GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+GEMINI_IMAGE_ENDPOINT = (
+    "https://generativelanguage.googleapis.com/v1/models/"
+    "{model}:generateContent"
+)
 NVIDIA_IMAGE_ENDPOINT = (
     "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.2-klein-4b"
 )
@@ -94,7 +101,7 @@ def split_contact_sheet(image, count, cols=CONTACT_SHEET_COLS,
     return crops
 
 
-def _extract_image_bytes(response_data):
+def _extract_nvidia_image_bytes(response_data):
     artifacts = response_data.get("artifacts")
     if isinstance(artifacts, list) and artifacts:
         encoded = artifacts[0].get("base64") or artifacts[0].get("image")
@@ -111,59 +118,164 @@ def _extract_image_bytes(response_data):
     raise RuntimeError("NVIDIA 图片接口没有返回可识别的图片数据。")
 
 
+def _extract_gemini_image_bytes(response_data):
+    candidates = response_data.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        block_reason = (
+            response_data.get("promptFeedback", {}).get("blockReason")
+            if isinstance(response_data.get("promptFeedback"), dict)
+            else None
+        )
+        detail = block_reason or "没有候选结果"
+        raise RuntimeError(f"Gemini 图片模型未生成图片（{detail}）。")
+    content = candidates[0].get("content")
+    parts = content.get("parts") if isinstance(content, dict) else None
+    if isinstance(parts, list):
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            inline = part.get("inlineData") or part.get("inline_data")
+            if not isinstance(inline, dict):
+                continue
+            encoded = inline.get("data")
+            if encoded:
+                return base64.b64decode(encoded)
+    reason = candidates[0].get("finishReason") or "响应中没有图片数据"
+    raise RuntimeError(f"Gemini 图片模型未生成图片（{reason}）。")
+
+
 def generate_topic_images(topics, api_key, progress_callback=None,
-                          request_fn=requests.post, cancel_event=None):
+                          request_fn=requests.post, cancel_event=None,
+                          provider="gemini", model=None):
     """一次生成联系表并裁出最多十二张手绘插画。"""
     selected = [item for item in topics if isinstance(item, dict)][:MAX_TOPIC_IMAGES]
     if not selected:
         return []
     if not str(api_key or "").strip():
-        raise ValueError("AI 话题配图需要 NVIDIA API Key。")
+        label = "Gemini" if provider == "gemini" else "NVIDIA"
+        raise ValueError(f"AI 话题配图需要 {label} API Key。")
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("任务已取消。")
 
     _notify(progress_callback, f"正在让图片模型绘制 {len(selected)} 张话题插画...")
-    payload = {
-        "cfg_scale": 1,
-        "height": 768,
-        "prompt": build_contact_sheet_prompt(selected),
-        "samples": 1,
-        "seed": 0,
-        "steps": 4,
-        "width": 1024,
-    }
-    try:
-        response = request_fn(
-            NVIDIA_IMAGE_ENDPOINT,
-            headers={
+    prompt = build_contact_sheet_prompt(selected)
+    if provider == "gemini":
+        selected_model = str(model or GEMINI_IMAGE_MODEL).strip()
+        endpoint = GEMINI_IMAGE_ENDPOINT.format(
+            model=quote(selected_model, safe="")
+        )
+        headers = {
+            "x-goog-api-key": api_key.strip(),
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "contents": [
+                {"role": "user", "parts": [{"text": prompt}]},
+            ],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"],
+                "responseFormat": {
+                    "image": {"aspectRatio": "4:3", "imageSize": "1K"}
+                },
+            },
+        }
+        timeout = (20, 180)
+        max_attempts = 3
+    elif provider == "nvidia":
+        endpoint = NVIDIA_IMAGE_ENDPOINT
+        headers = {
                 "Authorization": f"Bearer {api_key.strip()}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=(20, 120),
-        )
-    except requests.Timeout as exc:
-        raise RuntimeError("NVIDIA 图片模型等待超过 120 秒，请稍后重试。") from exc
-    except requests.RequestException as exc:
-        raise RuntimeError(f"连接 NVIDIA 图片模型失败：{exc}") from exc
+        }
+        payload = {
+            "cfg_scale": 1,
+            "height": 768,
+            "prompt": prompt,
+            "samples": 1,
+            "seed": 0,
+            "steps": 4,
+            "width": 1024,
+        }
+        timeout = (20, 120)
+        max_attempts = 1
+    else:
+        raise ValueError(f"不支持的图片服务商：{provider}")
 
-    if response.status_code in (401, 403):
-        raise RuntimeError("NVIDIA 图片模型拒绝了 Key，请确认 Key 有权调用该模型。")
-    if response.status_code == 402:
-        raise RuntimeError("NVIDIA 图片模型额度不足或当前端点需要付费。")
-    if response.status_code == 429:
-        raise RuntimeError("NVIDIA 图片模型请求过于频繁，请稍后再试。")
+    response = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = request_fn(
+                endpoint, headers=headers, json=payload, timeout=timeout
+            )
+        except requests.Timeout as exc:
+            if provider == "gemini" and attempt < max_attempts:
+                response = None
+            else:
+                raise RuntimeError(
+                    f"{'Gemini' if provider == 'gemini' else 'NVIDIA'} "
+                    f"图片模型等待超过 {timeout[1]} 秒，请稍后重试。"
+                ) from exc
+        except requests.RequestException as exc:
+            raise RuntimeError(f"连接图片模型失败：{exc}") from exc
+
+        transient = (
+            response is not None
+            and response.status_code in (408, 429, 500, 502, 503, 504)
+        )
+        if provider != "gemini" or attempt >= max_attempts or not (
+            response is None or transient
+        ):
+            break
+        delay = 2 ** (attempt - 1)
+        _notify(
+            progress_callback,
+            f"Gemini 图片服务暂时繁忙，{delay} 秒后重试...",
+        )
+        if cancel_event is not None:
+            if cancel_event.wait(delay):
+                raise RuntimeError("任务已取消。")
+        else:
+            time.sleep(delay)
+
+    if response is None:
+        raise RuntimeError("Gemini 图片请求没有收到响应，请稍后再试。")
+
+    if provider == "gemini":
+        gemini_errors = {
+            400: "Gemini 图片请求格式错误，请检查图片模型名。",
+            401: "Gemini API Key 无效，请确认复制完整。",
+            403: "Gemini 图片请求被拒绝，请确认项目已启用付费方案。",
+            404: "Gemini 没有找到图片模型，请检查模型名。",
+            429: "Gemini 图片模型达到频率或消费额度限制。",
+            500: "Gemini 图片服务暂时异常，请稍后重试。",
+            503: "Gemini 图片服务当前繁忙，请稍后重试。",
+        }
+        if response.status_code in gemini_errors:
+            raise RuntimeError(gemini_errors[response.status_code])
+    else:
+        if response.status_code in (401, 403):
+            raise RuntimeError("NVIDIA 图片模型拒绝了 Key，请确认 Key 有权调用该模型。")
+        if response.status_code == 402:
+            raise RuntimeError("NVIDIA 图片模型额度不足或当前端点需要付费。")
+        if response.status_code == 429:
+            raise RuntimeError("NVIDIA 图片模型请求过于频繁，请稍后再试。")
     try:
         response.raise_for_status()
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("任务已取消。")
-        raw_image = _extract_image_bytes(response.json())
+        response_data = response.json()
+        raw_image = (
+            _extract_gemini_image_bytes(response_data)
+            if provider == "gemini"
+            else _extract_nvidia_image_bytes(response_data)
+        )
         with Image.open(BytesIO(raw_image)) as opened:
             sheet = opened.convert("RGB")
-    except (ValueError, requests.RequestException) as exc:
+    except (OSError, ValueError, requests.RequestException) as exc:
         detail = response.text[:300] if response.text else str(exc)
-        raise RuntimeError(f"NVIDIA 图片模型返回异常：{detail}") from exc
+        label = "Gemini" if provider == "gemini" else "NVIDIA"
+        raise RuntimeError(f"{label} 图片模型返回异常：{detail}") from exc
 
     _notify(progress_callback, "AI 插画已生成，正在切分并排版...")
     return split_contact_sheet(sheet, len(selected))

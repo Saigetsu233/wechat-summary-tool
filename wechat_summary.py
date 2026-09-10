@@ -24,6 +24,8 @@ import datetime
 import json
 import requests
 import subprocess
+import time
+from urllib.parse import quote
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 常量
@@ -56,8 +58,16 @@ if IS_FROZEN:
 else:
     APP_DATA_DIR = SOURCE_DIR
 CONFIG_FILE = os.path.join(APP_DATA_DIR, "config.json")
-DEFAULT_PROVIDER = "deepseek"
+DEFAULT_PROVIDER = "gemini"
 PROVIDERS = {
+    "gemini": {
+        "label": "Google Gemini",
+        "endpoint": (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "{model}:generateContent"
+        ),
+        "default_model": "gemini-3.8-flash",
+    },
     "deepseek": {
         "label": "DeepSeek 官方",
         "endpoint": "https://api.deepseek.com/v1/chat/completions",
@@ -71,6 +81,8 @@ PROVIDERS = {
 }
 DEEPSEEK_REQUEST_TIMEOUT = (15, 90)
 NVIDIA_REQUEST_TIMEOUT = (20, 120)
+GEMINI_REQUEST_TIMEOUT = (20, 180)
+GEMINI_MAX_ATTEMPTS = 3
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. 查找微信数据目录
@@ -1229,54 +1241,125 @@ def _chat_completion(api_key, prompt, max_tokens=2000,
     if not clean_key:
         raise ValueError(f"请先填写 {label} API Key。")
     selected_model = str(model or "").strip() or str(provider_config["default_model"])
-    headers = {
-        "Authorization": f"Bearer {clean_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": selected_model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "你是一个信息提炼助手，擅长从群聊记录中提取有价值的内容。",
+    if provider == "gemini":
+        endpoint = str(provider_config["endpoint"]).format(
+            model=quote(selected_model, safe="")
+        )
+        headers = {
+            "x-goog-api-key": clean_key,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "system_instruction": {
+                "parts": [{
+                    "text": "你是一个信息提炼助手，擅长从群聊记录中提取有价值的内容。"
+                }]
             },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.3,
-        "max_tokens": max_tokens,
-    }
+            "contents": [
+                {"role": "user", "parts": [{"text": prompt}]},
+            ],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": max_tokens,
+                # 日报提炼属于常规任务，低思考档兼顾速度、成本和稳定性。
+                "thinkingConfig": {"thinkingLevel": "low"},
+            },
+        }
+    else:
+        endpoint = str(provider_config["endpoint"])
+        headers = {
+            "Authorization": f"Bearer {clean_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": selected_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是一个信息提炼助手，擅长从群聊记录中提取有价值的内容。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+        }
     # NVIDIA 的 DeepSeek V4 示例支持显式关闭思考模式。群聊摘要不需要
     # 输出推理过程，关闭后可明显减少免费端点的等待和输出 token。
     if provider == "nvidia" and "deepseek-v4" in selected_model.lower():
         payload["chat_template_kwargs"] = {"thinking": False}
-    timeout = (
-        NVIDIA_REQUEST_TIMEOUT if provider == "nvidia"
-        else DEEPSEEK_REQUEST_TIMEOUT
-    )
+    timeout = {
+        "gemini": GEMINI_REQUEST_TIMEOUT,
+        "nvidia": NVIDIA_REQUEST_TIMEOUT,
+    }.get(provider, DEEPSEEK_REQUEST_TIMEOUT)
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("任务已取消。")
-    try:
-        response = requests.post(
-            str(provider_config["endpoint"]),
-            headers=headers,
-            json=payload,
-            timeout=timeout,
+    max_attempts = GEMINI_MAX_ATTEMPTS if provider == "gemini" else 1
+    response = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.ReadTimeout as exc:
+            if provider == "gemini" and attempt < max_attempts:
+                response = None
+            elif provider == "nvidia":
+                raise RuntimeError(
+                    "NVIDIA 免费端点等待超过 120 秒。"
+                    "本段没有完成，但此前完成的段落已保留；再次生成会从缓存继续。"
+                ) from exc
+            elif provider == "gemini":
+                raise RuntimeError(
+                    "Gemini 连续等待超时。本段没有完成，但此前完成的段落已保留；"
+                    "再次生成会从缓存继续。"
+                ) from exc
+            else:
+                raise RuntimeError(
+                    "DeepSeek API 等待超过 90 秒，请检查网络后重试。"
+                ) from exc
+        except requests.RequestException as exc:
+            raise RuntimeError(f"连接 {label} API 失败：{exc}") from exc
+
+        transient_status = (
+            response is not None
+            and response.status_code in (408, 429, 500, 502, 503, 504)
         )
-    except requests.ReadTimeout as exc:
-        if provider != "nvidia":
-            raise RuntimeError(
-                "DeepSeek API 等待超过 90 秒，请检查网络后重试。"
-            ) from exc
-        raise RuntimeError(
-            "NVIDIA 免费端点等待超过 120 秒。"
-            "本段没有完成，但此前完成的段落已保留；再次生成会从缓存继续。"
-        ) from exc
-    except requests.RequestException as exc:
-        raise RuntimeError(f"连接 {label} API 失败：{exc}") from exc
+        if provider != "gemini" or attempt >= max_attempts or not (
+            response is None or transient_status
+        ):
+            break
+        delay = 2 ** (attempt - 1)
+        _notify_summary_progress(
+            retry_callback,
+            f"Gemini 暂时繁忙，{delay} 秒后重试（{attempt}/{max_attempts - 1}）...",
+        )
+        if cancel_event is not None:
+            if cancel_event.wait(delay):
+                raise RuntimeError("任务已取消。")
+        else:
+            time.sleep(delay)
+
+    if response is None:
+        raise RuntimeError("Gemini 请求没有收到响应，请稍后再试。")
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("任务已取消。")
 
-    if provider == "nvidia":
+    if provider == "gemini":
+        error_messages = {
+            400: "Gemini 请求格式错误，请检查模型名和输入内容。",
+            401: "Gemini API Key 无效，请确认复制完整。",
+            403: "Gemini 拒绝了请求，请检查 Key 权限以及项目是否已启用付费方案。",
+            404: "Gemini 没有找到该模型，请确认模型名和 API 版本。",
+            429: "Gemini 达到频率、Token、每日或消费额度限制，请检查项目配额。",
+            500: "Gemini 服务异常或输入过长，请稍后重试。",
+            502: "Gemini 网关暂时异常，请稍后重试。",
+            503: "Gemini 当前繁忙，请稍后重试。",
+            504: "Gemini 网关等待超时，请稍后重试。",
+        }
+    elif provider == "nvidia":
         error_messages = {
             400: "NVIDIA 请求格式错误，请检查模型名是否正确。",
             401: "NVIDIA API Key 无效，请在 API Catalog 重新生成并完整复制。",
@@ -1292,7 +1375,7 @@ def _chat_completion(api_key, prompt, max_tokens=2000,
         error_messages = {
             400: "DeepSeek 请求格式错误，请检查模型名。",
             401: "DeepSeek API Key 无效，请检查是否复制完整。",
-            402: "DeepSeek API 余额不足，请充值或切换到 NVIDIA API Catalog。",
+            402: "DeepSeek API 余额不足，请充值或切换到 Google Gemini。",
             422: "DeepSeek 不接受当前请求参数，请检查模型名。",
             429: "DeepSeek 请求过于频繁，请稍后再试。",
             500: "DeepSeek 服务暂时异常，请稍后再试。",
@@ -1303,7 +1386,21 @@ def _chat_completion(api_key, prompt, max_tokens=2000,
 
     try:
         response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
+        data = response.json()
+        if provider == "gemini":
+            parts = data["candidates"][0]["content"]["parts"]
+            content = "\n".join(
+                str(part.get("text") or "")
+                for part in parts
+                if isinstance(part, dict) and part.get("text")
+            )
+            if not content.strip():
+                finish_reason = data.get("candidates", [{}])[0].get(
+                    "finishReason", "没有文本输出"
+                )
+                raise ValueError(f"响应中没有文本内容（{finish_reason}）")
+        else:
+            content = data["choices"][0]["message"]["content"]
         if not isinstance(content, str) or not content.strip():
             raise ValueError("响应中没有文本内容")
         return content

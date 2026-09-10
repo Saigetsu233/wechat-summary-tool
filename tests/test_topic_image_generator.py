@@ -6,6 +6,8 @@ import threading
 from PIL import Image, ImageDraw
 
 from topic_image_generator import (
+    GEMINI_IMAGE_ENDPOINT,
+    GEMINI_IMAGE_MODEL,
     NVIDIA_IMAGE_ENDPOINT,
     build_contact_sheet_prompt,
     build_digest_illustration_requests,
@@ -26,6 +28,23 @@ class _FakeResponse:
 
     def raise_for_status(self):
         return None
+
+
+class _GeminiFakeResponse(_FakeResponse):
+    def json(self):
+        return {
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "inlineData": {
+                            "mimeType": "image/jpeg",
+                            "data": self.encoded_image,
+                        }
+                    }]
+                },
+                "finishReason": "STOP",
+            }]
+        }
 
 
 class TopicImageGeneratorTests(unittest.TestCase):
@@ -82,6 +101,7 @@ class TopicImageGeneratorTests(unittest.TestCase):
             ],
             "nvapi-test-key",
             request_fn=fake_request,
+            provider="nvidia",
         )
 
         self.assertEqual(len(calls), 1)
@@ -89,6 +109,38 @@ class TopicImageGeneratorTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["json"]["height"], 768)
         self.assertEqual(calls[0][1]["timeout"], (20, 120))
         self.assertEqual(len(images), 2)
+
+    def test_generate_topic_images_uses_gemini_native_image_api(self):
+        buffer = BytesIO()
+        self._sheet().save(buffer, format="JPEG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        calls = []
+
+        def fake_request(url, **kwargs):
+            calls.append((url, kwargs))
+            return _GeminiFakeResponse(encoded)
+
+        images = generate_topic_images(
+            [{"title": "雪板", "summary": "装备讨论"}],
+            "gemini-test-key",
+            request_fn=fake_request,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            calls[0][0],
+            GEMINI_IMAGE_ENDPOINT.format(model=GEMINI_IMAGE_MODEL),
+        )
+        self.assertEqual(
+            calls[0][1]["headers"]["x-goog-api-key"], "gemini-test-key"
+        )
+        generation = calls[0][1]["json"]["generationConfig"]
+        self.assertEqual(generation["responseModalities"], ["TEXT", "IMAGE"])
+        self.assertEqual(
+            generation["responseFormat"]["image"]["aspectRatio"], "4:3"
+        )
+        self.assertEqual(calls[0][1]["timeout"], (20, 180))
+        self.assertEqual(len(images), 1)
 
     def test_cancelled_image_request_does_not_reach_network(self):
         cancel_event = threading.Event()

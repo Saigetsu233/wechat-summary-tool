@@ -101,6 +101,14 @@ class WeChatSummaryApp:
         configured_provider = str(self.config.get("provider") or DEFAULT_PROVIDER)
         if configured_provider not in PROVIDERS:
             configured_provider = DEFAULT_PROVIDER
+        # 首次升级到 Gemini 版时，把旧 NVIDIA 默认项迁移到付费 Gemini。
+        # DeepSeek 用户保持原选择，仍可主动切换。
+        if (
+            int(self.config.get("provider_migration_version") or 0) < 2
+            and configured_provider == "nvidia"
+        ):
+            configured_provider = "gemini"
+        self.config["provider_migration_version"] = 2
         stored_keys = self.config.get("api_keys")
         self.provider_keys = dict(stored_keys) if isinstance(stored_keys, dict) else {}
         # 自动迁移旧版单个 DeepSeek Key 配置。
@@ -280,7 +288,11 @@ class WeChatSummaryApp:
         self.show_key_btn.pack(side="left", padx=(7, 0))
         self.key_hint_label = ttk.Label(
             self.api_frame,
-            text="Key 仅保存在本机；NVIDIA 免费额度以模型页为准",
+            text=(
+                "Key 仅保存在本机；Gemini 文字与插画可共用同一个 Key"
+                if self.current_provider == "gemini"
+                else "Key 仅保存在本机；图片日报配图使用单独保存的 Gemini Key"
+            ),
             style="Hint.TLabel", wraplength=300,
         )
         self.key_hint_label.pack(anchor="w", pady=(9, 0))
@@ -315,7 +327,7 @@ class WeChatSummaryApp:
         self.btn_image.grid(row=0, column=1, sticky="ew", padx=(6, 0))
         self.ai_images_check = ttk.Checkbutton(
             action_row,
-            text="使用 NVIDIA 图片模型生成话题插画（整页只调用 1 次）",
+            text="使用 Gemini 图片模型生成话题插画（整页只调用 1 次）",
             variable=self.ai_topic_images_var,
             style="Modern.TCheckbutton",
         )
@@ -491,6 +503,12 @@ class WeChatSummaryApp:
         self.model_var.set(
             str(self.provider_models.get(selected) or provider_default_model(selected))
         )
+        hint = (
+            "Key 仅保存在本机；Gemini 文字与插画可共用同一个 Key"
+            if selected == "gemini"
+            else "Key 仅保存在本机；图片日报配图使用单独保存的 Gemini Key"
+        )
+        self.key_hint_label.config(text=hint)
         self._set_status(f"已切换到 {provider_label(selected)}")
 
     def _on_manual_select(self):
@@ -586,8 +604,10 @@ class WeChatSummaryApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _on_init_click(self):
+        self._cancel_event.clear()
         self._set_ui_enabled(False)
         self._set_progress(True)
+        self.btn_cancel.config(state="normal")
         self._set_status("正在初始化...")
         threading.Thread(target=self._init_thread, daemon=True).start()
 
@@ -819,7 +839,8 @@ class WeChatSummaryApp:
                                    group_id=chatroom_id, days=days_approx,
                                    prompt_template=self._prompt_template,
                                    progress_callback=self._set_status,
-                                   provider=provider, model=model)
+                                   provider=provider, model=model,
+                                   cancel_event=self._cancel_event)
             self._last_summary_key = (
                 chatroom_id,
                 start_ts,
@@ -877,12 +898,12 @@ class WeChatSummaryApp:
             messagebox.showwarning("提示", "请先填写模型名。")
             return
         use_ai_images = bool(self.ai_topic_images_var.get())
-        image_api_key = str(self.provider_keys.get("nvidia") or "").strip()
+        image_api_key = str(self.provider_keys.get("gemini") or "").strip()
         if use_ai_images and not image_api_key:
             messagebox.showwarning(
-                "需要 NVIDIA Key",
-                "AI 话题插画使用 NVIDIA 图片模型。请先切换到 NVIDIA API Catalog，"
-                "填写并保存一次 Key；之后使用 DeepSeek 总结时也能复用。",
+                "需要 Gemini Key",
+                "AI 话题插画使用 Gemini 图片模型。请先切换到 Google Gemini，"
+                "填写并保存一次 Key；之后使用其他文字模型时也能复用。",
             )
             return
 
@@ -987,6 +1008,7 @@ class WeChatSummaryApp:
                     image_api_key,
                     progress_callback=report_progress,
                     cancel_event=self._cancel_event,
+                    provider="gemini",
                 )
             if self._cancel_event.is_set():
                 raise RuntimeError("任务已取消。")

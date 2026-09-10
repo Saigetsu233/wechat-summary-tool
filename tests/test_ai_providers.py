@@ -22,6 +22,55 @@ from wechat_summary import (
 
 class AIProviderTests(unittest.TestCase):
     @mock.patch("wechat_summary.requests.post")
+    def test_gemini_38_uses_native_generate_content_api(self, post):
+        response = mock.Mock(status_code=200)
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "candidates": [{
+                "content": {"parts": [{"text": "Gemini 总结结果"}]},
+                "finishReason": "STOP",
+            }]
+        }
+        post.return_value = response
+
+        result = _chat_completion("gemini-test-key", "test", provider="gemini")
+
+        self.assertEqual(result, "Gemini 总结结果")
+        self.assertEqual(
+            post.call_args.args[0],
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-3.8-flash:generateContent",
+        )
+        self.assertEqual(
+            post.call_args.kwargs["headers"]["x-goog-api-key"],
+            "gemini-test-key",
+        )
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body["contents"][0]["parts"][0]["text"], "test")
+        self.assertEqual(
+            body["generationConfig"]["thinkingConfig"],
+            {"thinkingLevel": "low"},
+        )
+        self.assertEqual(post.call_args.kwargs["timeout"], (20, 180))
+
+    @mock.patch("wechat_summary.time.sleep")
+    @mock.patch("wechat_summary.requests.post")
+    def test_gemini_retries_transient_service_error(self, post, sleep):
+        busy = mock.Mock(status_code=503)
+        success = mock.Mock(status_code=200)
+        success.raise_for_status.return_value = None
+        success.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "恢复成功"}]}}]
+        }
+        post.side_effect = [busy, success]
+
+        result = _chat_completion("test-key", "test", provider="gemini")
+
+        self.assertEqual(result, "恢复成功")
+        self.assertEqual(post.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    @mock.patch("wechat_summary.requests.post")
     def test_deepseek_402_has_friendly_error(self, post):
         post.return_value = mock.Mock(status_code=402)
         with self.assertRaisesRegex(RuntimeError, "余额不足"):
@@ -125,6 +174,7 @@ class AIProviderTests(unittest.TestCase):
         post.assert_not_called()
 
     def test_provider_default_models(self):
+        self.assertEqual(provider_default_model("gemini"), "gemini-3.8-flash")
         self.assertEqual(provider_default_model("deepseek"), "deepseek-chat")
         self.assertEqual(
             provider_default_model("nvidia"),

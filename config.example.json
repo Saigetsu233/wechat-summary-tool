@@ -1,11 +1,14 @@
 {
-  "provider": "nvidia",
+  "provider": "gemini",
   "api_keys": {
+    "gemini": "YOUR_GEMINI_API_KEY",
     "deepseek": "YOUR_DEEPSEEK_API_KEY",
     "nvidia": "YOUR_NVIDIA_API_KEY"
   },
   "models": {
+    "gemini": "gemini-3.8-flash",
     "deepseek": "deepseek-chat",
     "nvidia": "deepseek-ai/deepseek-v4-flash-0731"
-  }
+  },
+  "ai_topic_images": true
 }
