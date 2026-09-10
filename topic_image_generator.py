@@ -64,14 +64,36 @@ def build_contact_sheet_prompt(topics):
     return (prefix + ", ".join(panels) + suffix)[:800]
 
 
-def build_digest_illustration_requests(digest):
+def build_single_scene_prompt(topic, placement="topic"):
+    """为单一栏目生成有剧情、有关键物件的高细节手绘插画提示词。"""
+    title = str(topic.get("title") or "group chat topic").strip()
+    summary = str(topic.get("summary") or topic.get("reason") or "").strip()
+    visual = str(topic.get("visual_prompt") or "").strip()
+    subject = visual or f"{title}: {summary}"
+    subject = subject[:460]
+    role = "a lively group-chat participant portrait" if placement == "rank" else "a single editorial scene"
+    return (
+        "Create one polished standalone illustration for a Chinese group-chat daily newspaper. "
+        f"It must be {role}, faithfully depicting this specific topic: {subject}. "
+        f"Context for visual accuracy: {title} — {summary[:260]}. "
+        "Do not make a collage, contact sheet, grid, dashboard, UI, or multiple panels. "
+        "Show one clear main action and the concrete objects implied by the topic. "
+        "Premium playful Chinese hand-drawn editorial illustration: expressive chibi characters, "
+        "natural poses and faces, thick slightly imperfect dark-navy ink outlines, colored-pencil "
+        "texture, soft watercolor shading, bright pastel blue pink mint yellow palette, small hand-drawn "
+        "sparkles and empty speech bubbles. Composition must read clearly at small card size, with the "
+        "subject large and centered. No text, letters, numbers, logos, watermarks, borders, or captions."
+    )[:1150]
+
+
+def build_digest_illustration_requests(digest, detailed=False):
     """固定生成 12 格素材：六个话题、三个人物、三张栏目装饰。"""
     requests_list = []
     topics = digest.get("topics") if isinstance(digest.get("topics"), list) else []
     for topic in topics[:6]:
         if isinstance(topic, dict):
-            requests_list.append(topic)
-    while len(requests_list) < 6:
+            requests_list.append({**topic, "_illustration_role": "topic"})
+    while not detailed and len(requests_list) < 6:
         requests_list.append(
             {"visual_prompt": "friends happily chatting about everyday life"}
         )
@@ -81,12 +103,25 @@ def build_digest_illustration_requests(digest):
         if isinstance(digest.get("mvp_rankings"), list)
         else []
     )
-    for index in range(3):
-        item = rankings[index] if index < len(rankings) and isinstance(rankings[index], dict) else {}
+    for index, item in enumerate(rankings[:3]):
+        if not isinstance(item, dict):
+            continue
+        if detailed and not str(item.get("name") or "").strip():
+            continue
         requests_list.append(
             {
                 "visual_prompt": item.get("visual_prompt")
-                or "cheerful award winner portrait holding a small trophy"
+                or "cheerful award winner portrait holding a small trophy",
+                "_illustration_role": "rank",
+            }
+        )
+    if detailed:
+        return requests_list[:9]
+    while len(requests_list) < 9:
+        requests_list.append(
+            {
+                "visual_prompt": "cheerful award winner portrait holding a small trophy",
+                "_illustration_role": "rank",
             }
         )
     requests_list.extend(
@@ -162,21 +197,10 @@ def _extract_gemini_image_bytes(response_data):
     raise RuntimeError(f"Gemini 图片模型未生成图片（{reason}）。")
 
 
-def generate_topic_images(topics, api_key, progress_callback=None,
-                          request_fn=requests.post, cancel_event=None,
-                          provider="gemini", model=None):
-    """一次生成联系表并裁出最多十二张手绘插画。"""
-    selected = [item for item in topics if isinstance(item, dict)][:MAX_TOPIC_IMAGES]
-    if not selected:
-        return []
-    if not str(api_key or "").strip():
-        label = "Gemini" if provider == "gemini" else "NVIDIA"
-        raise ValueError(f"AI 话题配图需要 {label} API Key。")
-    if cancel_event is not None and cancel_event.is_set():
-        raise RuntimeError("任务已取消。")
-
-    _notify(progress_callback, f"正在让图片模型绘制 {len(selected)} 张话题插画...")
-    prompt = build_contact_sheet_prompt(selected)
+def _generate_images_from_prompt(selected, prompt, api_key, progress_callback=None,
+                                 request_fn=requests.post, cancel_event=None,
+                                 provider="gemini", model=None, split_sheet=True):
+    """执行一次图片请求；联系表模式可切片，单景模式返回整图。"""
     if provider == "gemini":
         selected_model = str(model or GEMINI_IMAGE_MODEL).strip()
         endpoint = GEMINI_IMAGE_ENDPOINT.format(
@@ -328,4 +352,57 @@ def generate_topic_images(topics, api_key, progress_callback=None,
         raise RuntimeError(f"{label} 图片模型返回异常：{detail}") from exc
 
     _notify(progress_callback, "AI 插画已生成，正在切分并排版...")
-    return split_contact_sheet(sheet, len(selected))
+    return split_contact_sheet(sheet, len(selected)) if split_sheet else [sheet]
+
+
+def generate_topic_images(topics, api_key, progress_callback=None,
+                          request_fn=requests.post, cancel_event=None,
+                          provider="gemini", model=None, mode="sheet"):
+    """生成插画：sheet 只请求一次；detailed 为每个栏目单独绘制。"""
+    selected = [item for item in topics if isinstance(item, dict)][:MAX_TOPIC_IMAGES]
+    if not selected:
+        return []
+    if not str(api_key or "").strip():
+        label = "Gemini" if provider == "gemini" else "NVIDIA"
+        raise ValueError(f"AI 话题配图需要 {label} API Key。")
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("任务已取消。")
+    if mode not in {"sheet", "detailed"}:
+        raise ValueError(f"不支持的插画模式：{mode}")
+    if mode == "detailed":
+        if provider != "gemini":
+            raise ValueError("精致插画模式目前仅支持 Gemini 图片模型。")
+        illustrations = []
+        total = len(selected)
+        for index, item in enumerate(selected, start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("任务已取消。")
+            placement = str(item.get("_illustration_role") or "topic")
+            _notify(progress_callback, f"正在精绘第 {index}/{total} 张栏目插画...")
+            illustrations.extend(
+                _generate_images_from_prompt(
+                    [item],
+                    build_single_scene_prompt(item, placement=placement),
+                    api_key,
+                    progress_callback=progress_callback,
+                    request_fn=request_fn,
+                    cancel_event=cancel_event,
+                    provider=provider,
+                    model=model,
+                    split_sheet=False,
+                )
+            )
+        return illustrations
+
+    _notify(progress_callback, f"正在让图片模型绘制 {len(selected)} 张话题插画...")
+    return _generate_images_from_prompt(
+        selected,
+        build_contact_sheet_prompt(selected),
+        api_key,
+        progress_callback=progress_callback,
+        request_fn=request_fn,
+        cancel_event=cancel_event,
+        provider=provider,
+        model=model,
+        split_sheet=True,
+    )

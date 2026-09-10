@@ -181,6 +181,20 @@ class AIProviderTests(unittest.TestCase):
             "deepseek-ai/deepseek-v4-flash-0731",
         )
 
+    def test_newspaper_digest_drops_generic_mvp_placeholders(self):
+        digest = wechat_summary._normalise_newspaper_digest(
+            {
+                "mvp_rankings": [
+                    {"name": "阿雪", "title": "装备参谋", "reason": "给出建议"},
+                    {"name": "群友", "title": "不该出现", "reason": "占位"},
+                    {"name": "", "title": "也不该出现", "reason": "占位"},
+                ]
+            },
+            "滑雪群", "2026-09-09", 10,
+        )
+
+        self.assertEqual([item["name"] for item in digest["mvp_rankings"]], ["阿雪"])
+
     @mock.patch("wechat_summary._chat_completion", return_value="NVIDIA 摘要")
     @mock.patch("wechat_summary._load_summary_cache", return_value=None)
     @mock.patch("wechat_summary._save_summary_cache")

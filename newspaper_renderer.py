@@ -168,12 +168,29 @@ def _rank_card(canvas, draw, item, sticker, box, rank):
     pale = ("#FFF8DA", "#F2F8FF", "#FFF2E8")[rank - 1]
     color = colors[rank - 1]
     _outlined_round_rect(draw, box, 18, pale, color, width=3, shadow=False)
+    if item.get("_placeholder"):
+        draw.ellipse(
+            ((left + right) // 2 - 45, top + 44, (left + right) // 2 + 45, top + 134),
+            fill=WHITE, outline=color, width=3,
+        )
+        draw.text(((left + right) // 2, top + 88), "☆", font=_font(48, True), fill=color, anchor="mm")
+        draw.text(((left + right) // 2, top + 168), "本日留空", font=_font(24, True), fill=INK, anchor="ma")
+        ribbon_y = top + 190
+        draw.rounded_rectangle((left + 14, ribbon_y, right - 14, ribbon_y + 39), radius=10, fill="#9AA9B8")
+        draw.text(((left + right) // 2, ribbon_y + 19), "不凑数", font=_font(18, True), fill=WHITE, anchor="mm")
+        reason_font = _font(16)
+        _draw_lines(
+            draw,
+            _wrap(draw, "只给当天有明确贡献的群友上榜。", reason_font, right - left - 28, 3),
+            (left + 14, ribbon_y + 53), reason_font, MUTED, 4, bullet=True,
+        )
+        return
     image_size = min(116, right - left - 38)
     image_left = (left + right - image_size) // 2
     _paste_sticker(canvas, sticker, (image_left, top + 22, image_left + image_size, top + 22 + image_size), color, circular=True)
     draw.ellipse((image_left - 7, top + 10, image_left + 35, top + 52), fill=YELLOW, outline=NAVY_DARK, width=3)
     draw.text((image_left + 14, top + 31), str(rank), font=_font(24, True), fill=NAVY_DARK, anchor="mm")
-    name = _clean(item.get("name")) or "群友"
+    name = _clean(item.get("name"))
     draw.text(((left + right) // 2, top + 154), name, font=_font(25, True), fill=INK, anchor="ma")
     title = _clean(item.get("title")) or ("摸鱼大王" if rank == 1 else f"摸鱼第 {rank} 名")
     ribbon_y = top + 190
@@ -190,7 +207,9 @@ def _achievement_card(canvas, draw, item, sticker, box, index):
     _paste_sticker(canvas, sticker, (left + 12, top + 14, left + 82, top + 84), color, circular=True)
     award_font = _font(18, True)
     _draw_lines(draw, _wrap(draw, item.get("award") or "今日成就", award_font, right - left - 108, 1), (left + 96, top + 13), award_font, PURPLE, 2)
-    draw.text((left + 96, top + 43), f"【{_clean(item.get('name')) or '群友'}】", font=_font(15, True), fill=color)
+    name = _clean(item.get("name"))
+    if name:
+        draw.text((left + 96, top + 43), f"【{name}】", font=_font(15, True), fill=color)
     reason_font = _font(14)
     _draw_lines(draw, _wrap(draw, item.get("reason") or "今日表现非常在线。", reason_font, right - left - 108, 3), (left + 96, top + 69), reason_font, INK, 2)
 
@@ -263,7 +282,7 @@ def render_newspaper(digest, output_path, topic_images=None):
     rank_w = (width - margin - right_left - 4 * rank_gap) // 3
     for index in range(3):
         x = right_left + rank_gap + index * (rank_w + rank_gap)
-        item = rankings[index] if index < len(rankings) else {"name": "群友", "title": f"摸鱼第 {index + 1} 名", "reason": "今日低调在线。"}
+        item = rankings[index] if index < len(rankings) else {"_placeholder": True}
         image_index = 6 + index
         sticker = images[image_index] if image_index < len(images) else (images[index] if index < len(images) else None)
         _rank_card(image, draw, item, sticker, (x, top + 74, x + rank_w, rank_bottom - 12), index + 1)
@@ -279,7 +298,7 @@ def render_newspaper(digest, output_path, topic_images=None):
         row, col = divmod(index, 2)
         x = right_left + ach_gap + col * (ach_w + ach_gap)
         y = ach_top + 72 + row * (ach_h + ach_gap)
-        item = achievements[index] if index < len(achievements) else {"award": "低调潜水奖", "name": "群友", "reason": "安静围观，也是一种稳定贡献。"}
+        item = achievements[index] if index < len(achievements) else {"award": "今日留白", "name": "", "reason": "今天就先不硬凑这个成就。"}
         image_index = 9 + (index % 3)
         _achievement_card(image, draw, item, images[image_index] if image_index < len(images) else None, (x, y, x + ach_w, y + ach_h), index)
 

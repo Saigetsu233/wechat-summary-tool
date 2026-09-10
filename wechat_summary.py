@@ -1653,9 +1653,10 @@ NEWSPAPER_DIGEST_PROMPT = """\
 2. 宁可少写也不要把字挤得过密，所有字段都要简短。
 3. 只能使用来源总结中已有的事实和发言人，不得杜撰。
 4. 不使用 emoji、网络链接或换行符，保持报纸杂志语气。
-5. 如果金句或人物归属不确定，对应 name 使用“群友”，禁止猜测；mvp_rankings 按今日存在感排序。
-6. visual_prompt 用英文描述一个有明确主体和动作的漫画画面，不含姓名、文字、数字、品牌或标志。
-7. tomorrow_topics 是基于当天尚未结束的话题作谨慎展望；special_notes 只写安全提醒、信息局限或需要继续确认的事情，不得把猜测写成事实。
+5. mvp_rankings 只能填写聊天记录中明确可识别、且当天确有发言或贡献的昵称；宁可只返回 1 人或 2 人，也绝不使用“群友”“某群友”“匿名”等占位名凑满 3 人。mvp_rankings 按今日存在感排序。
+6. 如果金句或趣味成就的归属不确定，可以不署名或使用“有群友提到”；禁止猜测具体是谁。
+7. visual_prompt 必须用英文描述一个有明确主体、具体动作和话题关键物件的单一漫画场景，不含姓名、文字、数字、品牌或标志；不得使用 generic chat, people talking, group chat 等泛泛描述。
+8. tomorrow_topics 是基于当天尚未结束的话题作谨慎展望；special_notes 只写安全提醒、信息局限或需要继续确认的事情，不得把猜测写成事实。
 """
 
 
@@ -1709,9 +1710,13 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
     for item in raw_rankings[:3]:
         if not isinstance(item, dict):
             continue
+        name = _short_text(item.get("name"), 12)
+        # 人物榜不能用“群友”占位凑数；这会让日报看起来像在乱封称号。
+        if not name or name.lower() in {"群友", "某群友", "匿名", "unknown", "n/a"}:
+            continue
         rankings.append(
             {
-                "name": _short_text(item.get("name"), 12) or "群友",
+                "name": name,
                 "title": _short_text(item.get("title"), 14),
                 "reason": _short_text(item.get("reason"), 60),
                 "visual_prompt": _short_text(item.get("visual_prompt"), 120),
@@ -1730,7 +1735,7 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
         achievements.append(
             {
                 "award": _short_text(item.get("award"), 16) or "今日成就",
-                "name": _short_text(item.get("name"), 14) or "群友",
+                "name": _short_text(item.get("name"), 14),
                 "reason": _short_text(item.get("reason"), 52),
             }
         )
@@ -1768,7 +1773,7 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
         "lead": _short_text(data.get("lead"), 130),
         "topics": clean_topics,
         "mvp": {
-            "name": _short_text(raw_mvp.get("name"), 16) or "群友",
+            "name": _short_text(raw_mvp.get("name"), 16),
             "title": _short_text(raw_mvp.get("title"), 20),
             "reason": _short_text(raw_mvp.get("reason"), 80),
         },

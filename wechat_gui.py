@@ -51,6 +51,7 @@ from wechat_summary import (
 )
 from newspaper_renderer import render_newspaper
 from topic_image_generator import (
+    GEMINI_IMAGE_MODEL,
     build_digest_illustration_requests,
     generate_topic_images,
 )
@@ -96,6 +97,12 @@ class WeChatSummaryApp:
         self._initialized = False
         self.ai_topic_images_var = tk.BooleanVar(
             value=bool(self.config.get("ai_topic_images", True))
+        )
+        self.detailed_illustrations_var = tk.BooleanVar(
+            value=bool(self.config.get("detailed_illustrations", False))
+        )
+        self.image_model_var = tk.StringVar(
+            value=str(self.config.get("image_model") or GEMINI_IMAGE_MODEL)
         )
 
         configured_provider = str(self.config.get("provider") or DEFAULT_PROVIDER)
@@ -296,6 +303,25 @@ class WeChatSummaryApp:
             style="Hint.TLabel", wraplength=300,
         )
         self.key_hint_label.pack(anchor="w", pady=(9, 0))
+        ttk.Label(self.api_frame, text="图片模型", style="FieldLabel.TLabel").pack(
+            anchor="w", pady=(10, 5)
+        )
+        self.image_model_combo = ttk.Combobox(
+            self.api_frame,
+            textvariable=self.image_model_var,
+            values=(
+                "gemini-3.1-flash-image",
+                "gemini-3-pro-image",
+            ),
+            state="readonly",
+            style="Modern.TCombobox",
+        )
+        self.image_model_combo.pack(fill="x")
+        ttk.Label(
+            self.api_frame,
+            text="Flash 更快更省；Pro 的手绘细节更强、费用更高。",
+            style="Hint.TLabel", wraplength=300,
+        ).pack(anchor="w", pady=(7, 0))
 
         # 右侧总结工作区
         header_row = ttk.Frame(right, style="Card.TFrame")
@@ -333,6 +359,15 @@ class WeChatSummaryApp:
         )
         self.ai_images_check.grid(
             row=1, column=0, sticky="w", pady=(10, 0)
+        )
+        self.detailed_images_check = ttk.Checkbutton(
+            action_row,
+            text="精致手绘模式：按栏目逐张绘制（最多 9 次调用，费用更高）",
+            variable=self.detailed_illustrations_var,
+            style="Modern.TCheckbutton",
+        )
+        self.detailed_images_check.grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(7, 0)
         )
         self.btn_cancel = ttk.Button(
             action_row,
@@ -481,6 +516,8 @@ class WeChatSummaryApp:
             self.api_entry.config(state=state)
             self.show_key_btn.config(state=state)
             self.ai_images_check.config(state=state)
+            self.detailed_images_check.config(state=state)
+            self.image_model_combo.config(state="readonly" if enabled else "disabled")
             if enabled:
                 self.btn_cancel.config(state="disabled")
         self.root.after(0, _do)
@@ -898,6 +935,8 @@ class WeChatSummaryApp:
             messagebox.showwarning("提示", "请先填写模型名。")
             return
         use_ai_images = bool(self.ai_topic_images_var.get())
+        detailed_illustrations = bool(self.detailed_illustrations_var.get())
+        image_model = str(self.image_model_var.get() or GEMINI_IMAGE_MODEL).strip()
         image_api_key = str(self.provider_keys.get("gemini") or "").strip()
         if use_ai_images and not image_api_key:
             messagebox.showwarning(
@@ -925,12 +964,13 @@ class WeChatSummaryApp:
         threading.Thread(
             target=self._image_thread,
             args=(idx, start_d, end_d, provider, api_key, model, output_path,
-                  use_ai_images, image_api_key),
+                  use_ai_images, image_api_key, detailed_illustrations, image_model),
             daemon=True,
         ).start()
 
     def _image_thread(self, idx, start_d, end_d, provider, api_key, model,
-                      output_path, use_ai_images, image_api_key):
+                      output_path, use_ai_images, image_api_key,
+                      detailed_illustrations, image_model=None):
         try:
             if idx < 0 or idx >= len(self.chatrooms):
                 raise ValueError("请选择一个群聊")
@@ -1003,15 +1043,19 @@ class WeChatSummaryApp:
             topic_images = []
             image_warning = ""
             if use_ai_images:
-                illustration_requests = build_digest_illustration_requests(digest)
+                illustration_requests = build_digest_illustration_requests(
+                    digest, detailed=detailed_illustrations
+                )
                 try:
                     topic_images = generate_topic_images(
                         illustration_requests,
                         image_api_key,
                         progress_callback=report_progress,
-                        cancel_event=self._cancel_event,
-                        provider="gemini",
-                    )
+                    cancel_event=self._cancel_event,
+                    provider="gemini",
+                    model=image_model or GEMINI_IMAGE_MODEL,
+                    mode="detailed" if detailed_illustrations else "sheet",
+                )
                 except RuntimeError as exc:
                     if self._cancel_event.is_set():
                         raise
@@ -1179,6 +1223,8 @@ class WeChatSummaryApp:
         cfg["api_keys"] = self.provider_keys
         cfg["models"] = self.provider_models
         cfg["ai_topic_images"] = bool(self.ai_topic_images_var.get())
+        cfg["detailed_illustrations"] = bool(self.detailed_illustrations_var.get())
+        cfg["image_model"] = self.image_model_var.get().strip() or GEMINI_IMAGE_MODEL
         # 保存自定义提示词（若与默认不同）
         if self._prompt_template != DEFAULT_PROMPT_TEMPLATE:
             cfg["prompt_template"] = self._prompt_template

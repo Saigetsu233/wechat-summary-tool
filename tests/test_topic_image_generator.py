@@ -162,6 +162,33 @@ class TopicImageGeneratorTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["timeout"], (20, 180))
         self.assertEqual(len(images), 1)
 
+    def test_detailed_mode_draws_each_topic_as_its_own_scene(self):
+        buffer = BytesIO()
+        self._sheet().save(buffer, format="JPEG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        calls = []
+
+        def fake_request(url, **kwargs):
+            calls.append((url, kwargs))
+            return _GeminiFakeResponse(encoded)
+
+        images = generate_topic_images(
+            [
+                {"title": "雪板选购", "summary": "比较板型与硬度", "visual_prompt": "a rider comparing two snowboards"},
+                {"title": "周末出发", "summary": "确认集合时间", "visual_prompt": "friends packing a car for a ski trip"},
+            ],
+            "gemini-test-key",
+            request_fn=fake_request,
+            mode="detailed",
+        )
+
+        self.assertEqual(len(images), 2)
+        self.assertEqual(len(calls), 2)
+        first_prompt = calls[0][1]["json"]["contents"][0]["parts"][0]["text"]
+        self.assertIn("standalone illustration", first_prompt)
+        self.assertIn("snowboards", first_prompt)
+        self.assertNotIn("four columns and three rows", first_prompt)
+
     def test_gemini_schema_error_retries_with_minimal_payload(self):
         buffer = BytesIO()
         self._sheet().save(buffer, format="JPEG")
