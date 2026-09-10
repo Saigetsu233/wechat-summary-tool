@@ -857,6 +857,139 @@ def load_contact_name_map(conn_contact):
         return {}
 
 
+def load_group_member_name_map(conn_contact):
+    """读取群成员的群昵称，返回 ``{群ID: {成员username: 群昵称}}``。
+
+    微信不同版本的 contact.db 表名和字段略有差异。这里不绑定某一个
+    固定 schema：优先识别常见的 chatroom_member / chat_room 关联表；找不到
+    群昵称时自然回退到普通联系人显示名，绝不把备注误当作群昵称。
+    """
+    if conn_contact is None:
+        return {}
+
+    try:
+        cur = conn_contact.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [str(row[0]) for row in cur.fetchall()]
+        table_lookup = {name.lower(): name for name in tables}
+
+        def first_column(columns, candidates):
+            by_lower = {column.lower(): column for column in columns}
+            return next((by_lower[name] for name in candidates if name in by_lower), None)
+
+        def columns_for(table):
+            cur.execute(f"PRAGMA table_info({_quote_sql_identifier(table)})")
+            return [str(row[1]) for row in cur.fetchall()]
+
+        contact_table = table_lookup.get("contact")
+        contact_by_id = {}
+        if contact_table:
+            contact_columns = columns_for(contact_table)
+            contact_id_column = first_column(contact_columns, ("id", "contact_id", "local_id"))
+            username_column = first_column(
+                contact_columns, ("username", "user_name", "usrname", "user_id")
+            )
+            if contact_id_column and username_column:
+                cur.execute(
+                    "SELECT "
+                    f"{_quote_sql_identifier(contact_id_column)}, "
+                    f"{_quote_sql_identifier(username_column)} "
+                    f"FROM {_quote_sql_identifier(contact_table)}"
+                )
+                contact_by_id = {
+                    _decode_db_text(row_id).strip(): _decode_db_text(username).strip()
+                    for row_id, username in cur.fetchall()
+                    if _decode_db_text(row_id).strip() and _decode_db_text(username).strip()
+                }
+
+        room_by_id = {}
+        for candidate in ("chat_room", "chatroom", "chat_room_info"):
+            room_table = table_lookup.get(candidate)
+            if not room_table:
+                continue
+            room_columns = columns_for(room_table)
+            room_id_column = first_column(room_columns, ("id", "room_id", "chatroom_id", "local_id"))
+            room_username_column = first_column(
+                room_columns, ("username", "user_name", "room_username", "chatroom_username")
+            )
+            if room_id_column and room_username_column:
+                cur.execute(
+                    "SELECT "
+                    f"{_quote_sql_identifier(room_id_column)}, "
+                    f"{_quote_sql_identifier(room_username_column)} "
+                    f"FROM {_quote_sql_identifier(room_table)}"
+                )
+                room_by_id.update(
+                    {
+                        _decode_db_text(row_id).strip(): _decode_db_text(username).strip()
+                        for row_id, username in cur.fetchall()
+                        if _decode_db_text(row_id).strip() and _decode_db_text(username).strip()
+                    }
+                )
+
+        result = {}
+        member_tables = [
+            table for table in tables
+            if "member" in table.lower() and ("room" in table.lower() or "chat" in table.lower())
+        ]
+        for member_table in member_tables:
+            columns = columns_for(member_table)
+            room_column = first_column(
+                columns, ("room_id", "chatroom_id", "chat_room_id", "roomid", "chatroomid", "talker")
+            )
+            member_username_column = first_column(
+                columns,
+                ("member_username", "member_user_name", "username", "user_name", "wxid"),
+            )
+            member_id_column = first_column(
+                columns, ("member_id", "contact_id", "user_id", "memberid")
+            )
+            nickname_column = first_column(
+                columns,
+                (
+                    "group_nickname", "room_nickname", "chatroom_nickname",
+                    "member_nickname", "display_name", "nick_name", "nickname", "name",
+                ),
+            )
+            if not room_column or not nickname_column:
+                continue
+
+            selected = [room_column, nickname_column]
+            if member_username_column and member_username_column not in selected:
+                selected.append(member_username_column)
+            if member_id_column and member_id_column not in selected:
+                selected.append(member_id_column)
+            cur.execute(
+                "SELECT " + ", ".join(_quote_sql_identifier(column) for column in selected)
+                + f" FROM {_quote_sql_identifier(member_table)}"
+            )
+            for row in cur.fetchall():
+                values = {
+                    column: _decode_db_text(value).strip()
+                    for column, value in zip(selected, row)
+                }
+                raw_room = values.get(room_column, "")
+                room_username = raw_room if raw_room.endswith("@chatroom") else room_by_id.get(raw_room, "")
+                member_username = values.get(member_username_column, "") if member_username_column else ""
+                if not member_username and member_id_column:
+                    member_username = contact_by_id.get(values.get(member_id_column, ""), "")
+                nickname = values.get(nickname_column, "")
+                if room_username and member_username and nickname and nickname != member_username:
+                    result.setdefault(room_username, {})[member_username] = nickname
+        return result
+    except sqlite3.Error:
+        return {}
+
+
+def get_sender_usernames_by_range(conn_msg, chatroom_id, start_ts: int, end_ts: int):
+    """返回某个时间段内实际发过言的成员 username，供群友名片设置使用。"""
+    return sorted(
+        {sender for _timestamp, sender, _content in _collect_text_rows(
+            conn_msg, chatroom_id, start_ts, end_ts
+        ) if sender}
+    )
+
+
 def _load_sender_username_map(cursor):
     """读取当前消息分库的 real_sender_id -> username 映射。"""
     try:
@@ -1707,7 +1840,10 @@ def _topic_points(raw_points, summary, limit=3):
     return points[:limit]
 
 
-def _normalise_newspaper_digest(data, group_name, date_range, message_count):
+def _normalise_newspaper_digest(
+    data, group_name, date_range, message_count, member_genders=None
+):
+    member_genders = member_genders if isinstance(member_genders, dict) else {}
     topics = data.get("topics") if isinstance(data.get("topics"), list) else []
     clean_topics = []
     for item in topics[:6]:
@@ -1747,6 +1883,8 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
                 "title": _short_text(item.get("title"), 14),
                 "reason": _short_text(item.get("reason"), 60),
                 "visual_prompt": _short_text(item.get("visual_prompt"), 120),
+                # 性别仅来自用户在“群友名片”中的明确设置；不根据昵称或头像猜。
+                "gender": str(member_genders.get(name) or "unspecified"),
             }
         )
     raw_mvp = rankings[0] if rankings else {}
@@ -1804,6 +1942,7 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
             "name": _short_text(raw_mvp.get("name"), 16),
             "title": _short_text(raw_mvp.get("title"), 20),
             "reason": _short_text(raw_mvp.get("reason"), 80),
+            "gender": str(raw_mvp.get("gender") or "unspecified"),
         },
         "mvp_rankings": rankings,
         "achievements": achievements,
@@ -1816,7 +1955,8 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
 
 def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
                         provider=DEFAULT_PROVIDER, model=None,
-                        progress_callback=None, cancel_event=None):
+                        progress_callback=None, cancel_event=None,
+                        member_genders=None):
     """把已提炼的文字总结压缩为单页图片所需的结构化字段。"""
     if not str(summary or "").strip():
         raise ValueError("没有可用于生成图片日报的总结内容。")
@@ -1827,6 +1967,20 @@ def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
         message_count=message_count,
         summary=summary,
     )
+    gender_hints = {
+        _short_text(name, 16): gender
+        for name, gender in (member_genders or {}).items()
+        if str(gender) in {"female", "male"} and _short_text(name, 16)
+    }
+    if gender_hints:
+        prompt += (
+            "\n\n人物形象约束（仅用于人物榜插画；未列出的昵称一律使用中性形象，"
+            "不得根据昵称、称号或聊天内容猜测性别）：\n"
+            + "\n".join(
+                f"- {name}：{'女性' if gender == 'female' else '男性'}"
+                for name, gender in gender_hints.items()
+            )
+        )
     try:
         response = _chat_completion(
             api_key,
@@ -1839,7 +1993,7 @@ def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
         )
         data = _parse_json_object(response)
         return _normalise_newspaper_digest(
-            data, group_name, date_range, message_count
+            data, group_name, date_range, message_count, gender_hints
         )
     except Exception as exc:
         raise RuntimeError(f"图片日报内容生成失败：{exc}") from exc

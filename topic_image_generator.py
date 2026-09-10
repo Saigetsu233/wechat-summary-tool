@@ -76,9 +76,18 @@ def build_single_scene_prompt(topic, placement="topic"):
     subject = visual or f"{title}: {summary}"
     subject = subject[:460]
     role = "a lively group-chat participant portrait" if placement == "rank" else "a single editorial scene"
+    gender = str(topic.get("gender") or "unspecified").strip().lower()
+    portrait_constraint = ""
+    if placement == "rank":
+        portrait_constraint = {
+            "female": " Depict the participant clearly as female; never change this to male.",
+            "male": " Depict the participant clearly as male; never change this to female.",
+        }.get(gender, " Use a gender-neutral character; never infer gender from a nickname.")
     return (
         "Create one polished standalone illustration for a Chinese group-chat daily newspaper. "
-        f"It must be {role}, faithfully depicting this specific topic: {subject}. "
+        f"It must be {role}, faithfully depicting this specific topic: {subject}."
+        + portrait_constraint
+        + " "
         f"Context for visual accuracy: {title} — {summary[:260]}. "
         "Do not make a collage, contact sheet, grid, dashboard, UI, or multiple panels. "
         "Show one clear main action and the concrete objects implied by the topic. "
@@ -217,6 +226,13 @@ def build_full_poster_prompt(digest):
         for index, item in enumerate(rankings, start=1):
             default_title = "摸鱼大王" if index == 1 else f"摸鱼第 {index} 名"
             lines.append(f"人物卡{index} 昵称：{str(item.get('name')).strip()}")
+            gender = str(item.get("gender") or "unspecified").strip().lower()
+            if gender == "female":
+                lines.append(f"人物卡{index} 人物形象：明确画成女性；不要根据昵称自行改成男性。")
+            elif gender == "male":
+                lines.append(f"人物卡{index} 人物形象：明确画成男性；不要根据昵称自行改成女性。")
+            else:
+                lines.append(f"人物卡{index} 人物形象：中性人物，不猜测或暗示性别。")
             lines.append(
                 f"人物卡{index} 称号：{str(item.get('title') or default_title).strip()}"
             )
@@ -361,10 +377,15 @@ def build_digest_illustration_requests(digest, detailed=False):
             continue
         if detailed and not str(item.get("name") or "").strip():
             continue
+        gender = str(item.get("gender") or "unspecified").strip().lower()
+        visual_prompt = str(
+            item.get("visual_prompt")
+            or "cheerful award winner portrait holding a small trophy"
+        ).strip()
         requests_list.append(
             {
-                "visual_prompt": item.get("visual_prompt")
-                or "cheerful award winner portrait holding a small trophy",
+                "visual_prompt": visual_prompt,
+                "gender": gender,
                 "_illustration_role": "rank",
             }
         )

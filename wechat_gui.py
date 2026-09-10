@@ -38,6 +38,8 @@ from wechat_summary import (
     select_decrypt_temp_dir,
     list_chatrooms,
     load_contact_name_map,
+    load_group_member_name_map,
+    get_sender_usernames_by_range,
     get_messages_by_range,
     ai_summarize,
     ai_newspaper_digest,
@@ -92,6 +94,14 @@ ORANGE = theme.ORANGE
 PURPLE = theme.PURPLE
 YELLOW = theme.YELLOW
 
+GENDER_CHOICES = (
+    ("未指定（中性人物）", "unspecified"),
+    ("女性", "female"),
+    ("男性", "male"),
+)
+GENDER_LABELS = {label: value for label, value in GENDER_CHOICES}
+GENDER_VALUES = {value: label for label, value in GENDER_CHOICES}
+
 
 def resource_path(filename):
     """返回源码运行或 PyInstaller 打包后的资源路径。"""
@@ -122,10 +132,13 @@ class WeChatSummaryApp:
         self.tmp_contact_path = None
         self.chatrooms = []   # [(chatroom_id, count, display_name), ...]
         self.contact_name_map = {}
+        self.group_member_name_map = {}
         self._last_summary_key = None
         self._last_summary_text = ""
         self._cancel_event = threading.Event()
         self.config = load_config()
+        stored_profiles = self.config.get("member_profiles")
+        self.member_profiles = stored_profiles if isinstance(stored_profiles, dict) else {}
         self._initialized = False
         self.ai_topic_images_var = tk.BooleanVar(
             value=bool(self.config.get("ai_topic_images", True))
@@ -387,11 +400,16 @@ class WeChatSummaryApp:
         )
         self.msg_count_label = ttk.Label(title_area, text="等待选择群聊", style="Hint.TLabel")
         self.msg_count_label.pack(anchor="w", pady=(3, 0))
+        self.btn_member_profiles = ttk.Button(
+            header_row, text="群友名片", command=self._on_edit_member_profiles,
+            state="disabled", style="Soft.TButton",
+        )
+        self.btn_member_profiles.grid(row=0, column=1, sticky="e", padx=(8, 8))
         self.btn_edit_prompt = ttk.Button(
             header_row, text="调整提示词", command=self._on_edit_prompt,
             style="Soft.TButton",
         )
-        self.btn_edit_prompt.grid(row=0, column=1, sticky="e")
+        self.btn_edit_prompt.grid(row=0, column=2, sticky="e")
 
         action_row = ttk.Frame(right, style="Card.TFrame")
         action_row.grid(row=1, column=0, sticky="ew", pady=(18, 14))
@@ -644,6 +662,9 @@ class WeChatSummaryApp:
             self.chatroom_combo.config(
                 state="readonly" if enabled and self._initialized else "disabled"
             )
+            self.btn_member_profiles.config(
+                state="normal" if enabled and self._initialized else "disabled"
+            )
             self.provider_combo.config(state="readonly" if enabled else "disabled")
             self.model_entry.config(state=state)
             self.api_entry.config(state=state)
@@ -780,6 +801,7 @@ class WeChatSummaryApp:
         self.tmp_msg_paths = []
         self.tmp_contact_path = None
         self.contact_name_map = {}
+        self.group_member_name_map = {}
         self._last_summary_key = None
         self._last_summary_text = ""
 
@@ -924,6 +946,7 @@ class WeChatSummaryApp:
     def _load_chatrooms(self):
         rooms = list_chatrooms(self.conn_msg)
         self.contact_name_map = load_contact_name_map(self.conn_contact)
+        self.group_member_name_map = load_group_member_name_map(self.conn_contact)
         self.chatrooms = []
         for cr_id, count in rooms:
             nick = self.contact_name_map.get(
@@ -940,6 +963,173 @@ class WeChatSummaryApp:
             self.chatroom_combo.current(0)
         self.btn_summarize.config(state="normal")
         self.btn_image.config(state="normal")
+
+    def _sender_name_map_for_room(self, chatroom_id):
+        """合并联系人备注、自动群昵称和用户手动名片；群昵称优先。"""
+        names = dict(self.contact_name_map)
+        names.update(self.group_member_name_map.get(chatroom_id, {}))
+        custom_profiles = self.member_profiles.get(chatroom_id, {})
+        if isinstance(custom_profiles, dict):
+            for username, profile in custom_profiles.items():
+                if not isinstance(profile, dict):
+                    continue
+                custom_name = str(profile.get("name") or "").strip()
+                if custom_name:
+                    names[str(username)] = custom_name
+        return names
+
+    def _member_gender_hints(self, chatroom_id, sender_name_map):
+        """把明确设置的性别转换成模型能识别的“展示昵称 → 性别”映射。"""
+        hints = {}
+        profiles = self.member_profiles.get(chatroom_id, {})
+        if not isinstance(profiles, dict):
+            return hints
+        for username, profile in profiles.items():
+            if not isinstance(profile, dict):
+                continue
+            gender = str(profile.get("gender") or "unspecified").strip().lower()
+            display_name = str(sender_name_map.get(str(username)) or "").strip()
+            if gender in {"female", "male"} and display_name:
+                hints[display_name] = gender
+        return hints
+
+    def _on_edit_member_profiles(self):
+        """允许用户校正群昵称与人物形象，避免模型根据昵称瞎猜。"""
+        idx = self.chatroom_combo.current()
+        if idx < 0 or idx >= len(self.chatrooms):
+            messagebox.showwarning("提示", "请先选择一个群聊。")
+            return
+        chatroom_id, _count, display = self.chatrooms[idx]
+        start_d, end_d = self.start_date.get_date(), self.end_date.get_date()
+        if start_d > end_d:
+            messagebox.showwarning("日期错误", "开始日期不能晚于结束日期。")
+            return
+        start_ts = int(datetime.datetime.combine(start_d, datetime.time.min).timestamp())
+        end_ts = int(datetime.datetime.combine(end_d, datetime.time.max).timestamp())
+        try:
+            active_users = get_sender_usernames_by_range(
+                self.conn_msg, chatroom_id, start_ts, end_ts
+            )
+        except Exception as exc:
+            messagebox.showerror("读取群成员失败", str(exc))
+            return
+        users = sorted(set(active_users) | set(self.group_member_name_map.get(chatroom_id, {})))
+        if not users:
+            messagebox.showinfo("没有可设置的群友", "所选时间范围内没有识别到可编辑的发言人。")
+            return
+
+        name_map = self._sender_name_map_for_room(chatroom_id)
+        existing = self.member_profiles.get(chatroom_id, {})
+        window = tk.Toplevel(self.root)
+        window.title("群友名片 · 群昵称与人物形象")
+        window.geometry("720x620")
+        window.minsize(620, 460)
+        window.transient(self.root)
+
+        top = ttk.Frame(window, padding=(18, 16, 18, 8))
+        top.pack(fill="x")
+        ttk.Label(top, text=f"{display.split('（')[0].strip()} · 群友名片", style="PanelTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            top,
+            text="已自动优先读取群昵称。需要纠正时可改“日报显示名”；人物榜默认使用中性形象，\n"
+                 "只有这里明确选了女性或男性，才会把该约束交给图片模型。",
+            style="Hint.TLabel",
+            justify="left",
+        ).pack(anchor="w", pady=(5, 0))
+
+        table = ttk.Frame(window, padding=(18, 4, 8, 0))
+        table.pack(fill="both", expand=True)
+        canvas = tk.Canvas(table, bg=APP_BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(table, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        rows_frame = tk.Frame(canvas, bg=APP_BG)
+        canvas_window = canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        rows_frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(canvas_window, width=event.width),
+        )
+
+        header = tk.Frame(rows_frame, bg=APP_BG)
+        header.pack(fill="x", pady=(0, 5))
+        header.columnconfigure(0, weight=3)
+        header.columnconfigure(1, weight=3)
+        header.columnconfigure(2, weight=2)
+        for column, text in enumerate(("当前识别的群友", "日报显示名", "人物形象")):
+            tk.Label(header, text=text, bg=APP_BG, fg=MUTED,
+                     font=(self._fonts["body"], 9, "bold")).grid(
+                row=0, column=column, sticky="w", padx=(4, 8)
+            )
+
+        edited_rows = []
+        for username in users:
+            profile = existing.get(username, {}) if isinstance(existing, dict) else {}
+            auto_name = str(
+                self.group_member_name_map.get(chatroom_id, {}).get(username)
+                or self.contact_name_map.get(username)
+                or username
+            ).strip()
+            current_name = str(profile.get("name") or auto_name).strip()
+            gender = str(profile.get("gender") or "unspecified").strip().lower()
+            if gender not in GENDER_VALUES:
+                gender = "unspecified"
+            row = tk.Frame(rows_frame, bg=CARD_BG, highlightbackground=BORDER,
+                           highlightthickness=1)
+            row.pack(fill="x", pady=3)
+            row.columnconfigure(0, weight=3)
+            row.columnconfigure(1, weight=3)
+            row.columnconfigure(2, weight=2)
+            tk.Label(row, text=f"{auto_name}\n{username}", bg=CARD_BG, fg=INK,
+                     justify="left", anchor="w", font=(self._fonts["body"], 9),
+                     wraplength=220).grid(row=0, column=0, sticky="ew", padx=8, pady=7)
+            name_var = tk.StringVar(value=current_name)
+            ttk.Entry(row, textvariable=name_var, style="Modern.TEntry").grid(
+                row=0, column=1, sticky="ew", padx=(0, 8), pady=8
+            )
+            gender_var = tk.StringVar(value=GENDER_VALUES[gender])
+            ttk.Combobox(
+                row, textvariable=gender_var, state="readonly",
+                values=[label for label, _value in GENDER_CHOICES],
+                style="Modern.TCombobox",
+            ).grid(row=0, column=2, sticky="ew", padx=(0, 8), pady=8)
+            edited_rows.append((username, auto_name, name_var, gender_var))
+
+        buttons = ttk.Frame(window, padding=(18, 10, 18, 16))
+        buttons.pack(fill="x")
+
+        def save_profiles():
+            group_profiles = dict(existing) if isinstance(existing, dict) else {}
+            for username, auto_name, name_var, gender_var in edited_rows:
+                desired_name = name_var.get().strip()
+                gender = GENDER_LABELS.get(gender_var.get(), "unspecified")
+                profile = {}
+                if desired_name and desired_name != auto_name:
+                    profile["name"] = desired_name
+                if gender != "unspecified":
+                    profile["gender"] = gender
+                if profile:
+                    group_profiles[username] = profile
+                else:
+                    group_profiles.pop(username, None)
+            if group_profiles:
+                self.member_profiles[chatroom_id] = group_profiles
+            else:
+                self.member_profiles.pop(chatroom_id, None)
+            self.config["member_profiles"] = self.member_profiles
+            self._last_summary_key = None
+            self._last_summary_text = ""
+            self._set_status("群友名片已保存；下次生成将使用群昵称和人物形象设置。")
+            window.destroy()
+
+        ttk.Button(buttons, text="保存名片", command=save_profiles,
+                   style="Primary.TButton").pack(side="right")
+        ttk.Button(buttons, text="取消", command=window.destroy,
+                   style="Soft.TButton").pack(side="right", padx=(0, 8))
 
     # ─────────────────────────────────────────────────────────────────────────
     # 生成总结流程
@@ -995,6 +1185,7 @@ class WeChatSummaryApp:
             # 转时间戳（已在主线程获取日期）
             start_ts = int(datetime.datetime.combine(start_d, datetime.time.min).timestamp())
             end_ts = int(datetime.datetime.combine(end_d, datetime.time.max).timestamp())
+            sender_name_map = self._sender_name_map_for_room(chatroom_id)
 
             # 读消息
             messages = get_messages_by_range(
@@ -1002,7 +1193,7 @@ class WeChatSummaryApp:
                 chatroom_id,
                 start_ts,
                 end_ts,
-                sender_name_map=self.contact_name_map,
+                sender_name_map=sender_name_map,
             )
             n = len(messages)
 
@@ -1132,12 +1323,13 @@ class WeChatSummaryApp:
             end_ts = int(
                 datetime.datetime.combine(end_d, datetime.time.max).timestamp()
             )
+            sender_name_map = self._sender_name_map_for_room(chatroom_id)
             messages = get_messages_by_range(
                 self.conn_msg,
                 chatroom_id,
                 start_ts,
                 end_ts,
-                sender_name_map=self.contact_name_map,
+                sender_name_map=sender_name_map,
             )
             if not messages:
                 raise ValueError("该时间段内没有文本消息。")
@@ -1189,6 +1381,9 @@ class WeChatSummaryApp:
                 model=model,
                 progress_callback=report_progress,
                 cancel_event=self._cancel_event,
+                member_genders=self._member_gender_hints(
+                    chatroom_id, sender_name_map
+                ),
             )
             topic_images = []
             image_warning = ""
@@ -1397,6 +1592,7 @@ class WeChatSummaryApp:
         cfg.pop("detailed_illustrations", None)
         cfg["illustration_mode"] = self._current_illustration_mode()
         cfg["image_model"] = self.image_model_var.get().strip() or GEMINI_IMAGE_MODEL
+        cfg["member_profiles"] = self.member_profiles
         # 保存自定义提示词（若与默认不同）
         if self._prompt_template != DEFAULT_PROMPT_TEMPLATE:
             cfg["prompt_template"] = self._prompt_template
