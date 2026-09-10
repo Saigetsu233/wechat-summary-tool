@@ -39,6 +39,7 @@ from wechat_summary import (
     list_chatrooms,
     load_contact_name_map,
     load_group_member_name_map,
+    load_contact_gender_map,
     get_sender_usernames_by_range,
     get_messages_by_range,
     ai_summarize,
@@ -133,6 +134,7 @@ class WeChatSummaryApp:
         self.chatrooms = []   # [(chatroom_id, count, display_name), ...]
         self.contact_name_map = {}
         self.group_member_name_map = {}
+        self.contact_gender_map = {}
         self._last_summary_key = None
         self._last_summary_text = ""
         self._cancel_event = threading.Event()
@@ -802,6 +804,7 @@ class WeChatSummaryApp:
         self.tmp_contact_path = None
         self.contact_name_map = {}
         self.group_member_name_map = {}
+        self.contact_gender_map = {}
         self._last_summary_key = None
         self._last_summary_text = ""
 
@@ -947,6 +950,7 @@ class WeChatSummaryApp:
         rooms = list_chatrooms(self.conn_msg)
         self.contact_name_map = load_contact_name_map(self.conn_contact)
         self.group_member_name_map = load_group_member_name_map(self.conn_contact)
+        self.contact_gender_map = load_contact_gender_map(self.conn_contact)
         self.chatrooms = []
         for cr_id, count in rooms:
             nick = self.contact_name_map.get(
@@ -987,7 +991,11 @@ class WeChatSummaryApp:
         for username, profile in profiles.items():
             if not isinstance(profile, dict):
                 continue
-            gender = str(profile.get("gender") or "unspecified").strip().lower()
+            gender = str(
+                profile["gender"]
+                if "gender" in profile
+                else self.contact_gender_map.get(str(username), "unspecified")
+            ).strip().lower()
             display_name = str(sender_name_map.get(str(username)) or "").strip()
             if gender in {"female", "male"} and display_name:
                 hints[display_name] = gender
@@ -1031,8 +1039,8 @@ class WeChatSummaryApp:
         ttk.Label(top, text=f"{display.split('（')[0].strip()} · 群友名片", style="PanelTitle.TLabel").pack(anchor="w")
         ttk.Label(
             top,
-            text="已自动优先读取群昵称。需要纠正时可改“日报显示名”；人物榜默认使用中性形象，\n"
-                 "只有这里明确选了女性或男性，才会把该约束交给图片模型。",
+            text="已自动优先读取群昵称；若微信联系人库明确记录性别，也会自动预填。\n"
+                 "没有资料时使用中性人物；可在这里覆盖自动结果，绝不根据昵称或头像猜。",
             style="Hint.TLabel",
             justify="left",
         ).pack(anchor="w", pady=(5, 0))
@@ -1075,7 +1083,12 @@ class WeChatSummaryApp:
                 or username
             ).strip()
             current_name = str(profile.get("name") or auto_name).strip()
-            gender = str(profile.get("gender") or "unspecified").strip().lower()
+            auto_gender = str(
+                self.contact_gender_map.get(username) or "unspecified"
+            ).strip().lower()
+            gender = str(
+                profile["gender"] if "gender" in profile else auto_gender
+            ).strip().lower()
             if gender not in GENDER_VALUES:
                 gender = "unspecified"
             row = tk.Frame(rows_frame, bg=CARD_BG, highlightbackground=BORDER,
@@ -1097,20 +1110,21 @@ class WeChatSummaryApp:
                 values=[label for label, _value in GENDER_CHOICES],
                 style="Modern.TCombobox",
             ).grid(row=0, column=2, sticky="ew", padx=(0, 8), pady=8)
-            edited_rows.append((username, auto_name, name_var, gender_var))
+            edited_rows.append((username, auto_name, auto_gender, name_var, gender_var))
 
         buttons = ttk.Frame(window, padding=(18, 10, 18, 16))
         buttons.pack(fill="x")
 
         def save_profiles():
             group_profiles = dict(existing) if isinstance(existing, dict) else {}
-            for username, auto_name, name_var, gender_var in edited_rows:
+            for username, auto_name, auto_gender, name_var, gender_var in edited_rows:
                 desired_name = name_var.get().strip()
                 gender = GENDER_LABELS.get(gender_var.get(), "unspecified")
                 profile = {}
                 if desired_name and desired_name != auto_name:
                     profile["name"] = desired_name
-                if gender != "unspecified":
+                # 与自动读取的值相同则不落盘；主动改为“未指定”可屏蔽自动资料。
+                if gender != auto_gender:
                     profile["gender"] = gender
                 if profile:
                     group_profiles[username] = profile

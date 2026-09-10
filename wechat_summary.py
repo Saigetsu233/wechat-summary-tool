@@ -981,6 +981,59 @@ def load_group_member_name_map(conn_contact):
         return {}
 
 
+def load_contact_gender_map(conn_contact):
+    """读取联系人库中明确记录的性别，不对昵称、头像或聊天内容做推断。"""
+    if conn_contact is None:
+        return {}
+    try:
+        cur = conn_contact.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {str(row[0]).lower(): str(row[0]) for row in cur.fetchall()}
+        contact_table = tables.get("contact")
+        if not contact_table:
+            return {}
+        cur.execute(f"PRAGMA table_info({_quote_sql_identifier(contact_table)})")
+        columns = [str(row[1]) for row in cur.fetchall()]
+        by_lower = {column.lower(): column for column in columns}
+        username_column = next(
+            (
+                by_lower[name]
+                for name in ("username", "user_name", "usrname", "user_id")
+                if name in by_lower
+            ),
+            None,
+        )
+        gender_column = next(
+            (
+                by_lower[name]
+                for name in ("gender", "sex", "gender_type", "sex_type")
+                if name in by_lower
+            ),
+            None,
+        )
+        if not username_column or not gender_column:
+            return {}
+        cur.execute(
+            "SELECT "
+            f"{_quote_sql_identifier(username_column)}, "
+            f"{_quote_sql_identifier(gender_column)} "
+            f"FROM {_quote_sql_identifier(contact_table)}"
+        )
+        values = {
+            "1": "male", "male": "male", "m": "male", "男": "male",
+            "2": "female", "female": "female", "f": "female", "女": "female",
+        }
+        result = {}
+        for username, raw_gender in cur.fetchall():
+            username = _decode_db_text(username).strip()
+            gender = values.get(_decode_db_text(raw_gender).strip().lower())
+            if username and gender:
+                result[username] = gender
+        return result
+    except sqlite3.Error:
+        return {}
+
+
 def get_sender_usernames_by_range(conn_msg, chatroom_id, start_ts: int, end_ts: int):
     """返回某个时间段内实际发过言的成员 username，供群友名片设置使用。"""
     return sorted(

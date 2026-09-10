@@ -7,6 +7,7 @@ from unittest import mock
 
 from wechat_summary import (
     ai_newspaper_digest,
+    load_contact_gender_map,
     load_group_member_name_map,
 )
 from topic_image_generator import build_full_poster_prompt, build_single_scene_prompt
@@ -17,12 +18,12 @@ class GroupNicknameTests(unittest.TestCase):
         conn = sqlite3.connect(":memory:")
         conn.executescript(
             """
-            CREATE TABLE contact (id INTEGER, username TEXT, remark TEXT, nick_name TEXT);
+            CREATE TABLE contact (id INTEGER, username TEXT, remark TEXT, nick_name TEXT, sex INTEGER);
             CREATE TABLE chat_room (id INTEGER, username TEXT);
             CREATE TABLE chatroom_member (
                 room_id INTEGER, member_id INTEGER, group_nickname TEXT
             );
-            INSERT INTO contact VALUES (7, 'wxid_alice', '小红的微信备注', 'Alice');
+            INSERT INTO contact VALUES (7, 'wxid_alice', '小红的微信备注', 'Alice', 2);
             INSERT INTO chat_room VALUES (3, 'ski@chatroom');
             INSERT INTO chatroom_member VALUES (3, 7, '雪场小红');
             """
@@ -32,6 +33,7 @@ class GroupNicknameTests(unittest.TestCase):
             load_group_member_name_map(conn),
             {"ski@chatroom": {"wxid_alice": "雪场小红"}},
         )
+        self.assertEqual(load_contact_gender_map(conn), {"wxid_alice": "female"})
 
 
 class PortraitGenderTests(unittest.TestCase):
