@@ -111,7 +111,7 @@ class WeChatSummaryApp:
         self.root = root
         self.root.title("群聊日报 · AI Digest")
         self.root.resizable(True, True)
-        self.root.minsize(1040, 900)
+        self.root.minsize(1040, 820)
         self.root.configure(bg=APP_BG)
 
         # 后端状态
@@ -205,10 +205,10 @@ class WeChatSummaryApp:
     def _build_ui(self):
         self._configure_styles()
 
-        # 顶部品牌区：深藏青圆角横幅，右边一只摸鱼猫
+        # 顶部品牌区：干净的产品化横幅，右侧用日报图标收尾
         hero_wrap = tk.Frame(self.root, bg=APP_BG)
-        hero_wrap.pack(fill="x", padx=18, pady=(14, 4))
-        hero = tk.Canvas(hero_wrap, bg=APP_BG, highlightthickness=0, bd=0, height=108)
+        hero_wrap.pack(fill="x", padx=20, pady=(16, 6))
+        hero = tk.Canvas(hero_wrap, bg=APP_BG, highlightthickness=0, bd=0, height=96)
         hero.pack(fill="x")
 
         def _paint_hero(_event=None):
@@ -216,33 +216,35 @@ class WeChatSummaryApp:
             if width <= 1:
                 return
             hero.delete("hero")
-            theme.round_rect(hero, 4, 6, width - 2, 104, 22,
+            theme.round_rect(hero, 4, 5, width - 2, 91, 18,
                              fill=theme.PAPER_DEEP, outline="", tags="hero")
-            theme.round_rect(hero, 2, 2, width - 4, 100, 22,
-                             fill=NAVY, outline=NAVY_DARK, width=2, tags="hero")
+            theme.round_rect(hero, 2, 2, width - 4, 87, 18,
+                             fill=NAVY, outline=NAVY_DARK, width=1, tags="hero")
+            hero.create_rectangle(22, 84, width - 22, 87, fill=CYAN,
+                                  outline="", tags="hero")
             hero.tag_lower("hero")
 
         hero.bind("<Configure>", _paint_hero)
 
         self._icon_bubble = theme.to_photo(theme.chat_bubble(46, "#FFFFFF", NAVY))
-        tk.Label(hero, image=self._icon_bubble, bg=NAVY, bd=0).place(x=26, y=28)
+        tk.Label(hero, image=self._icon_bubble, bg=NAVY, bd=0).place(x=28, y=24)
         title_block = tk.Frame(hero, bg=NAVY)
-        title_block.place(x=84, y=20)
+        title_block.place(x=86, y=17)
         tk.Label(
             title_block, text="群聊日报", bg=NAVY, fg="white",
-            font=(self._fonts["display"], 25),
+            font=(self._fonts["display"], 24, "bold"),
         ).pack(anchor="w")
         tk.Label(
             title_block, text="—  把几百条消息，变成一分钟读完的今日头版  —",
-            bg=NAVY, fg="#C6D3E8", font=(self._fonts["body"], 9, "bold"),
+            bg=NAVY, fg="#C6D3E8", font=(self._fonts["body"], 9),
         ).pack(anchor="w", pady=(3, 0))
 
-        self._icon_cat = theme.to_photo(theme.cat_with_laptop(112))
+        self._icon_cat = theme.to_photo(theme.digest_mark(70))
         tk.Label(hero, image=self._icon_cat, bg=NAVY, bd=0).place(
-            relx=1.0, x=-136, y=14
+            relx=1.0, x=-104, y=12
         )
 
-        workspace = ttk.Frame(self.root, style="App.TFrame", padding=(20, 18, 20, 14))
+        workspace = ttk.Frame(self.root, style="App.TFrame", padding=(20, 14, 20, 12))
         workspace.pack(fill="both", expand=True)
         workspace.columnconfigure(0, minsize=362, weight=0)
         workspace.columnconfigure(1, weight=1)
@@ -459,14 +461,14 @@ class WeChatSummaryApp:
         self.btn_cancel.grid(row=1, column=1, sticky="e", pady=(10, 0))
 
         text_shell = tk.Frame(
-            right, bg=theme.PAPER, highlightbackground=GREEN,
-            highlightthickness=2, bd=0,
+            right, bg="#F8FAFC", highlightbackground=LINE,
+            highlightthickness=1, bd=0,
         )
         text_shell.grid(row=2, column=0, sticky="nsew")
         self.result_text = scrolledtext.ScrolledText(
             text_shell, wrap="word", state="disabled", bd=0,
-            relief="flat", bg=theme.PAPER, fg=INK, insertbackground=PRIMARY,
-            selectbackground="#DCD8FF", font=("微软雅黑", 10),
+            relief="flat", bg="#F8FAFC", fg=INK, insertbackground=PRIMARY,
+            selectbackground="#DCE8FF", font=(self._fonts["body"], 10),
             padx=16, pady=14, spacing1=2, spacing3=5,
         )
         self.result_text.pack(fill="both", expand=True)
@@ -528,11 +530,12 @@ class WeChatSummaryApp:
         pill("Primary.TButton", PRIMARY, PRIMARY_DARK, "#A9D3E8")
         pill("Teal.TButton", CYAN, "#06909F", "#A6E0E6")
         pill("Pink.TButton", PINK, "#D33A63", "#F5AEC1")
-        style.configure("Soft.TButton", background=theme.PAPER_DEEP, foreground=INK,
-                        borderwidth=0, padding=(12, 8), font=(body, 9, "bold"))
+        style.configure("Soft.TButton", background="#F8FAFC", foreground=INK,
+                        borderwidth=1, relief="solid", padding=(12, 8),
+                        font=(body, 9, "bold"))
         style.map("Soft.TButton",
-                  background=[("pressed", "#E7DEC9"), ("active", "#EFE7D5"),
-                              ("disabled", "#F4F0E6")],
+                  background=[("pressed", "#DCE8F7"), ("active", "#EEF4FB"),
+                              ("disabled", "#EEF1F5")],
                   foreground=[("disabled", MUTED)])
 
         style.configure("Modern.TEntry", fieldbackground=theme.PAPER,
@@ -581,8 +584,8 @@ class WeChatSummaryApp:
         ).pack(anchor="w")
 
     def _show_result_placeholder(self):
-        """空状态：放一只趴着的小猫，别让右边一片空白。"""
-        self._placeholder_cat = theme.to_photo(theme.cat_head(84))
+        """空状态：用日报图标和明确的下一步提示，避免视觉噪音。"""
+        self._placeholder_cat = theme.to_photo(theme.digest_mark(84))
         self.result_text.config(state="normal")
         self.result_text.delete("1.0", "end")
         self.result_text.tag_configure("center", justify="center")
@@ -590,7 +593,7 @@ class WeChatSummaryApp:
         self.result_text.image_create("end", image=self._placeholder_cat)
         self.result_text.insert(
             "end",
-            "\n\n还没有总结\n先连接微信，选好群聊和日期，再点上面的按钮\n",
+            "\n\n准备好生成一份日报？\n先连接微信，选好群聊和日期，再点上面的按钮\n",
             "center",
         )
         self.result_text.tag_add("center", "1.0", "end")

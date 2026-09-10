@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""桌面界面的手绘主题：配色、字体、圆角粗描边卡片和 PIL 现画的小插画。
+"""桌面界面的视觉主题：配色、字体、卡片和运行时绘制的轻量图标。
 
 图标全部在运行时用 PIL 画出来，不依赖任何素材文件，PyInstaller 打包后也能用。
 """
@@ -10,23 +10,23 @@ from tkinter import font as tkfont
 from PIL import Image, ImageDraw, ImageTk
 
 
-# 与日报海报同一套配色，界面和产出物看起来是一家人。
-PAPER = "#FFFDF6"
-PAPER_DEEP = "#F6F1E4"
+# 与日报海报同一套配色，但桌面端使用更克制的工作台底色。
+PAPER = "#F4F7FB"
+PAPER_DEEP = "#E9EEF6"
 CARD = "#FFFFFF"
-NAVY = "#1F2B54"
-NAVY_DARK = "#16203F"
-INK = "#17283D"
-MUTED = "#5F6F81"
-LINE = "#DFE5EE"
+NAVY = "#111B33"
+NAVY_DARK = "#0A1022"
+INK = "#18263D"
+MUTED = "#64748B"
+LINE = "#D8E1EC"
 
-BLUE = "#1596D2"
-PINK = "#EF4D78"
-GREEN = "#12A36E"
-ORANGE = "#F59B23"
-PURPLE = "#7046C1"
-CYAN = "#08AFC7"
-YELLOW = "#F6C531"
+BLUE = "#2878F0"
+PINK = "#E64D77"
+GREEN = "#149B73"
+ORANGE = "#E99A29"
+PURPLE = "#7357D8"
+CYAN = "#16A6B8"
+YELLOW = "#F3B82F"
 
 CAT_BODY = "#2C2C38"
 CAT_LINE = "#14141C"
@@ -51,11 +51,11 @@ def pick_font(root, *candidates):
 
 
 def fonts(root):
-    """界面用到的三档字体：手写标题、圆润小标题、正文。"""
+    """界面用到的三档字体：现代标题、清晰小标题、正文。"""
     return {
-        "display": pick_font(root, "华文琥珀", "站酷快乐体", "幼圆", "微软雅黑"),
-        "round": pick_font(root, "幼圆", "微软雅黑 UI", "微软雅黑"),
-        "body": pick_font(root, "微软雅黑", "Deng", "等线"),
+        "display": pick_font(root, "Segoe UI Semibold", "Aptos Display", "微软雅黑 UI", "微软雅黑"),
+        "round": pick_font(root, "Segoe UI", "微软雅黑 UI", "微软雅黑"),
+        "body": pick_font(root, "Segoe UI", "微软雅黑", "Deng", "等线"),
     }
 
 
@@ -143,7 +143,41 @@ def _cat_face(draw, box, line_width=3):
 
 
 def cat_head(size=64, line_width=3):
-    """一只圆头小黑猫，用在页头和空状态里。"""
+    """兼容旧调用：现在返回现代日报图标，不再使用猫咪占位图。"""
+    return digest_mark(size)
+
+
+def digest_mark(size=64):
+    """现代日报图标：叠放的卡片、折角和一颗状态星。"""
+    key = ("digest_mark", size)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    scale = 4
+    S = size * scale
+    canvas = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    line = max(2, int(size * 0.035)) * scale
+    draw.rounded_rectangle((S * .10, S * .19, S * .82, S * .87), radius=int(S*.11),
+                           fill="#DCE8FF", outline="#8AA6D7", width=line)
+    draw.rounded_rectangle((S * .18, S * .10, S * .90, S * .78), radius=int(S*.11),
+                           fill="#FFFFFF", outline="#2878F0", width=line)
+    draw.polygon([(S*.66, S*.10), (S*.90, S*.10), (S*.90, S*.33)], fill="#DDE9FF")
+    draw.line([(S*.66, S*.10), (S*.66, S*.33), (S*.90, S*.33)], fill="#8AA6D7", width=line)
+    draw.rounded_rectangle((S*.29, S*.40, S*.76, S*.47), radius=int(S*.025), fill="#2878F0")
+    draw.rounded_rectangle((S*.29, S*.54, S*.69, S*.60), radius=int(S*.02), fill="#B4C7EA")
+    draw.rounded_rectangle((S*.29, S*.66, S*.57, S*.72), radius=int(S*.02), fill="#B4C7EA")
+    c = S*.83
+    r = S*.13
+    draw.ellipse((c-r, c-r, c+r, c+r), fill="#F3B82F", outline="#FFFFFF", width=line)
+    draw.line([(c, c-r*.55), (c, c+r*.55)], fill="#FFFFFF", width=line)
+    draw.line([(c-r*.55, c), (c+r*.55, c)], fill="#FFFFFF", width=line)
+    image = canvas.resize((size, size), Image.Resampling.LANCZOS)
+    _ICON_CACHE[key] = image
+    return image
+
+
+def cat_head_legacy(size=64, line_width=3):
+    """旧版猫咪图标实现，保留为兼容函数但不再用于 UI。"""
     key = ("cat", size, line_width)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
@@ -162,7 +196,12 @@ def cat_head(size=64, line_width=3):
 
 
 def cat_with_laptop(width=112):
-    """页头吉祥物：小黑猫趴在笔记本前面摸鱼，右边配一杯热饮。"""
+    """兼容旧调用：页头使用现代日报图标。"""
+    return digest_mark(width)
+
+
+def cat_with_laptop_legacy(width=112):
+    """旧版猫咪插画实现，保留以便第三方调用不报错。"""
     key = ("cat_laptop", width)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
@@ -246,7 +285,7 @@ def chat_bubble(size=44, color="#FFFFFF", dot=NAVY):
 
 
 def step_badge(text, accent, size=38):
-    """步骤序号贴纸：粗描边圆角方块，手绘贴纸感。"""
+    """现代步骤序号：圆形色块，避免手绘贴纸的倾斜和粗描边。"""
     key = ("badge", text, accent, size)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
@@ -254,10 +293,8 @@ def step_badge(text, accent, size=38):
     S = size * scale
     canvas = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle(
-        (S * 0.10, S * 0.10, S * 0.90, S * 0.90),
-        radius=int(S * 0.26), fill=accent, outline=NAVY_DARK, width=3 * scale,
-    )
+    draw.ellipse((S * 0.08, S * 0.08, S * 0.92, S * 0.92),
+                 fill=accent, outline="#FFFFFF", width=2 * scale)
     from PIL import ImageFont
 
     font = None
@@ -270,9 +307,7 @@ def step_badge(text, accent, size=38):
     if font is None:
         font = ImageFont.load_default()
     draw.text((S * 0.5, S * 0.52), str(text), font=font, fill="#FFFFFF", anchor="mm")
-    image = canvas.resize((size, size), Image.Resampling.LANCZOS).rotate(
-        -4, resample=Image.Resampling.BICUBIC, expand=False
-    )
+    image = canvas.resize((size, size), Image.Resampling.LANCZOS)
     _ICON_CACHE[key] = image
     return image
 
@@ -307,7 +342,7 @@ def to_photo(image):
 
 
 class HandCard(tk.Canvas):
-    """手绘感卡片：Canvas 画圆角粗描边，内容照旧 pack 进 body。
+    """现代卡片容器：细边框、柔和阴影和一条彩色顶部标识线。
 
     用法：
         holder = HandCard(parent, accent=BLUE)
@@ -348,13 +383,17 @@ class HandCard(tk.Canvas):
             if int(self.cget("height")) != height:
                 self.configure(height=height)
         self.delete("card_bg")
-        # 影子先画，再画卡面，手绘贴纸的浮起感靠这一层
+        # 轻阴影 + 细边框，卡片不再使用粗描边和手绘倾斜效果。
         round_rect(
-            self, 4, 5, width - 2, height - 2, self._radius,
-            fill=PAPER_DEEP, outline="", tags="card_bg",
+            self, 3, 4, width - 2, height - 2, self._radius,
+            fill="#DDE5F0", outline="", tags="card_bg",
         )
         round_rect(
-            self, 2, 2, width - 4, height - 5, self._radius,
-            fill=self._bg, outline=self._accent, width=self._border, tags="card_bg",
+            self, 1, 1, width - 4, height - 5, self._radius,
+            fill=self._bg, outline=LINE, width=1, tags="card_bg",
+        )
+        # 只保留一条窄窄的色带，作为不同步骤的视觉识别。
+        self.create_rectangle(
+            1, 1, width - 4, 5, fill=self._accent, outline="", tags="card_bg"
         )
         self.tag_lower("card_bg")
