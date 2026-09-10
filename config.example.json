@@ -10,5 +10,7 @@
     "deepseek": "deepseek-chat",
     "nvidia": "deepseek-ai/deepseek-v4-flash-0731"
   },
-  "ai_topic_images": true
+  "ai_topic_images": true,
+  "illustration_mode": "poster",
+  "image_model": "gemini-3-pro-image"
 }

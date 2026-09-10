@@ -95,6 +95,40 @@ def _draw_lines(draw, lines, xy, font, fill=INK, gap=6, bullet=False):
     return y
 
 
+def _draw_points(draw, points, xy, font, max_width, max_lines, fill=INK, gap=5):
+    """按“一条要点一个圆点”绘制，折行只缩进不再补点。"""
+    x, y = xy
+    bbox = draw.textbbox((0, 0), "中Ag", font=font)
+    line_height = bbox[3] - bbox[1]
+    items = [str(point).strip() for point in points if str(point or "").strip()]
+    remaining = max_lines
+    per_point = max_lines if len(items) <= 1 else 2
+    for point in items:
+        if remaining <= 0:
+            break
+        for index, line in enumerate(
+            _wrap(draw, point, font, max_width - 16, min(per_point, remaining))
+        ):
+            if index == 0:
+                draw.ellipse((x, y + 7, x + 6, y + 13), fill=fill)
+            draw.text((x + 16, y), line, font=font, fill=fill)
+            y += line_height + gap
+            remaining -= 1
+    return y
+
+
+def _points_of(item, fallback_keys=("summary", "reason")):
+    points = item.get("points") if isinstance(item.get("points"), list) else []
+    cleaned = [str(point).strip() for point in points if str(point or "").strip()]
+    if cleaned:
+        return cleaned
+    for key in fallback_keys:
+        text = str(item.get(key) or "").strip()
+        if text:
+            return [text]
+    return []
+
+
 def _outlined_round_rect(draw, box, radius, fill, outline, width=3, shadow=True):
     left, top, right, bottom = [int(v) for v in box]
     if shadow:
@@ -151,14 +185,17 @@ def _topic_card(canvas, draw, topic, sticker, box, index):
     draw.ellipse((left + 12, top + 10, left + 59, top + 57), fill=color, outline=WHITE, width=2)
     draw.text((left + 35, top + 33), str(index), font=_font(27, True), fill=WHITE, anchor="mm")
     title_font = _font(24, True)
-    _draw_lines(draw, _wrap(draw, topic.get("title") or f"今日话题 {index}", title_font, right - left - 82, 1), (left + 68, top + 16), title_font, color, 4)
+    title_lines = _wrap(draw, topic.get("title") or f"今日话题 {index}", title_font, right - left - 82, 2)
+    body_top = _draw_lines(draw, title_lines, (left + 68, top + 16), title_font, color, 4)
     if isinstance(sticker, Image.Image):
         _paste_sticker(canvas, sticker, (right - 124, bottom - 112, right - 12, bottom - 12), color)
         text_width = right - left - 150
     else:
         text_width = right - left - 28
     body_font = _font(18)
-    _draw_lines(draw, _wrap(draw, topic.get("summary") or "", body_font, text_width, 6), (left + 16, top + 67), body_font, INK, 5, bullet=True)
+    body_top = max(body_top + 6, top + 67)
+    max_lines = max(2, (bottom - 16 - body_top) // 23)
+    _draw_points(draw, _points_of(topic), (left + 16, body_top), body_font, text_width, min(6, max_lines))
     _sparkles(draw, right - 142, bottom - 46, color)
 
 
@@ -174,7 +211,7 @@ def _rank_card(canvas, draw, item, sticker, box, rank):
             fill=WHITE, outline=color, width=3,
         )
         draw.text(((left + right) // 2, top + 88), "☆", font=_font(48, True), fill=color, anchor="mm")
-        draw.text(((left + right) // 2, top + 168), "本日留空", font=_font(24, True), fill=INK, anchor="ma")
+        draw.text(((left + right) // 2, top + 144), "本日留空", font=_font(24, True), fill=INK, anchor="ma")
         ribbon_y = top + 190
         draw.rounded_rectangle((left + 14, ribbon_y, right - 14, ribbon_y + 39), radius=10, fill="#9AA9B8")
         draw.text(((left + right) // 2, ribbon_y + 19), "不凑数", font=_font(18, True), fill=WHITE, anchor="mm")
@@ -197,7 +234,11 @@ def _rank_card(canvas, draw, item, sticker, box, rank):
     draw.rounded_rectangle((left + 14, ribbon_y, right - 14, ribbon_y + 39), radius=10, fill=color)
     draw.text(((left + right) // 2, ribbon_y + 19), title, font=_font(18, True), fill=WHITE, anchor="mm")
     reason_font = _font(16)
-    _draw_lines(draw, _wrap(draw, item.get("reason") or "今日贡献稳定，节目效果在线。", reason_font, right - left - 28, 4), (left + 14, ribbon_y + 53), reason_font, INK, 4, bullet=True)
+    _draw_points(
+        draw,
+        _points_of(item, ("reason",)) or ["今日贡献稳定，节目效果在线。"],
+        (left + 14, ribbon_y + 53), reason_font, right - left - 28, 4,
+    )
 
 
 def _achievement_card(canvas, draw, item, sticker, box, index):
@@ -229,10 +270,25 @@ def _numbered_list(draw, items, box, color, max_items, quote_mode=False):
             text, speaker = _clean(item), ""
         if quote_mode and text:
             text = f"“{text}”"
-        max_text_width = right - left - 70 - (80 if speaker else 0)
+        speaker_font = _font(14)
+        # 按实际宽度让位，长昵称不再压住金句正文。
+        speaker_width = (
+            int(draw.textlength(f"— {speaker}", font=speaker_font)) + 18 if speaker else 0
+        )
+        max_text_width = right - left - 70 - speaker_width
         _draw_lines(draw, _wrap(draw, text, body_font, max_text_width, 2), (left + 51, row_y + 8), body_font, INK, 2)
         if speaker:
-            draw.text((right - 10, row_y + 12), f"— {speaker}", font=_font(14), fill=MUTED, anchor="ra")
+            draw.text((right - 10, row_y + 12), f"— {speaker}", font=speaker_font, fill=MUTED, anchor="ra")
+
+
+def save_poster_image(poster, output_path):
+    """保存整图模式下由图片模型直接绘制的海报，不再叠加本地排版。"""
+    if not isinstance(poster, Image.Image):
+        raise ValueError("整图海报数据无效。")
+    output = Path(output_path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    poster.convert("RGB").save(output, format="PNG", optimize=True)
+    return output
 
 
 def render_newspaper(digest, output_path, topic_images=None):
@@ -265,11 +321,10 @@ def render_newspaper(digest, output_path, topic_images=None):
     cards_top, card_gap = top + 150, 12
     card_w = (left_right - margin - 3 * card_gap) // 2
     card_h = (upper_bottom - cards_top - 4 * card_gap) // 3
-    for index in range(6):
+    for index, topic in enumerate(topics):
         row, col = divmod(index, 2)
         x = margin + card_gap + col * (card_w + card_gap)
         y = cards_top + row * (card_h + card_gap)
-        topic = topics[index] if index < len(topics) else {"title": "今日留白", "summary": "今天暂时没有更多需要记录的话题。"}
         _topic_card(image, draw, topic, images[index] if index < len(images) else None, (x, y, x + card_w, y + card_h), index + 1)
 
     rank_bottom = 554
@@ -278,13 +333,18 @@ def render_newspaper(digest, output_path, topic_images=None):
     rankings = [item for item in (digest.get("mvp_rankings") or []) if isinstance(item, dict)][:3]
     if not rankings:
         rankings = [digest.get("mvp") if isinstance(digest.get("mvp"), dict) else {}]
+    # 只画当天真的评出来的人，不再用“本日留空”占位卡凑满一行。
+    rankings = [item for item in rankings if _clean(item.get("name"))] or [{"_placeholder": True}]
     rank_gap = 10
+    rank_slots = len(rankings)
+    # 卡片宽度始终按三人位算，人少时整组居中，避免出现一张超宽空卡。
     rank_w = (width - margin - right_left - 4 * rank_gap) // 3
-    for index in range(3):
-        x = right_left + rank_gap + index * (rank_w + rank_gap)
-        item = rankings[index] if index < len(rankings) else {"_placeholder": True}
+    rank_span = rank_slots * rank_w + (rank_slots - 1) * rank_gap
+    rank_start = right_left + max(rank_gap, (width - margin - right_left - rank_span) // 2)
+    for index, item in enumerate(rankings):
+        x = rank_start + index * (rank_w + rank_gap)
         image_index = 6 + index
-        sticker = images[image_index] if image_index < len(images) else (images[index] if index < len(images) else None)
+        sticker = images[image_index] if image_index < len(images) else None
         _rank_card(image, draw, item, sticker, (x, top + 74, x + rank_w, rank_bottom - 12), index + 1)
 
     ach_top = rank_bottom + gap
@@ -294,11 +354,10 @@ def render_newspaper(digest, output_path, topic_images=None):
     ach_gap = 10
     ach_w = (width - margin - right_left - 3 * ach_gap) // 2
     ach_h = (upper_bottom - (ach_top + 72) - 4 * ach_gap) // 3
-    for index in range(6):
+    for index, item in enumerate(achievements):
         row, col = divmod(index, 2)
         x = right_left + ach_gap + col * (ach_w + ach_gap)
         y = ach_top + 72 + row * (ach_h + ach_gap)
-        item = achievements[index] if index < len(achievements) else {"award": "今日留白", "name": "", "reason": "今天就先不硬凑这个成就。"}
         image_index = 9 + (index % 3)
         _achievement_card(image, draw, item, images[image_index] if image_index < len(images) else None, (x, y, x + ach_w, y + ach_h), index)
 

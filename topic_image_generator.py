@@ -10,6 +10,7 @@ import requests
 
 
 GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+GEMINI_POSTER_MODEL = "gemini-3-pro-image"
 GEMINI_IMAGE_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1/models/"
     "{model}:generateContent"
@@ -20,6 +21,9 @@ NVIDIA_IMAGE_ENDPOINT = (
 CONTACT_SHEET_COLS = 4
 CONTACT_SHEET_ROWS = 3
 MAX_TOPIC_IMAGES = 12
+POSTER_ASPECT_RATIO = "1:1"
+POSTER_IMAGE_SIZE = "4K"
+POSTER_MIN_SIDE = 1400
 
 
 def _notify(callback, message):
@@ -86,6 +90,252 @@ def build_single_scene_prompt(topic, placement="topic"):
     )[:1150]
 
 
+POSTER_LAYOUT_BRIEF = """\
+READ THIS FIRST: everything before the content block is an instruction addressed to
+you, and none of it may ever appear as text in the picture. Never letter words such as
+canvas, header, main area, left column, right column, bottom band, footer, layout or
+style onto the poster, and never letter any other English word that is not part of the
+content block. The only words drawn on the poster are the Chinese strings listed in the
+content block, together with the Latin fragments that appear inside those strings.
+
+The page is one single square sheet. Divide it into four horizontal zones, top to bottom:
+a header band (about 9% of the page height), a main area (about 58%), a bottom band
+(about 29%) and a thin footer bar (about 4%). The bottom band spans the entire page
+width, edge to edge - it is not nested inside the main area's right column. Keep outer
+page margins tight and even; no large empty gaps anywhere.
+
+At the top, draw a deep-navy rounded banner. Left: a white speech-bubble icon, then the
+group name and the words 群聊日报 on ONE single line in a chunky rounded Chinese display
+face (shrink the type as needed to keep it on one line), with the tagline line directly
+underneath. Centre-right: the date in large type, and the message-count line just below
+it. Far right, inside the banner: a chibi black cat mascot with a laptop and a mug, plus
+one tiny hand-lettered sticker.
+
+Below the banner, on the left, filling about 46% of the page width, draw a blue rounded frame titled
+今日群聊概览 in a numbered pill header, the 导语 paragraph below it, then EXACTLY
+{topic_count} topic card(s) laid out in {topic_grid}, sized so they fill the frame with no
+empty slot. Every topic card carries its own pastel fill and thick colored border, a
+filled circle with its number, the topic title in that card's accent color, its bullet
+points as real bullets, and a small hand-drawn comic vignette that sits BESIDE or BELOW
+the bullets without pushing them out - the vignette takes at most the lower 40% of the
+card. Each vignette has chibi characters plus a speech balloon carrying that card's
+气泡台词. Balloons and characters may gently overlap the card border.
+
+Beside it, in the remaining width, draw at the top an orange rounded frame
+titled 摸鱼大王评选 holding EXACTLY {rank_count} podium card(s) in one row. Make the cards
+EQUAL width and EQUAL height - a flat row, not a stepped podium. Each has a circular
+chibi portrait at the top, a small rank medallion, a crown or trophy for the first one,
+the nickname in bold below the portrait, a colored ribbon banner with the title, and the
+reason as bullets underneath.
+
+Directly under that orange frame, draw a purple rounded frame titled 趣味成就颁发 with
+EXACTLY {ach_count} white achievement card(s) in 2 columns. Each has a round hand-drawn
+doodle icon on the left, the award name in bold, the nickname in brackets in the accent
+color, the reason underneath, and on a few of them a tiny chibi figure or mini balloon
+tucked into a corner.
+
+Under everything above, running the full page width, draw three rounded frames side by side, titled 群聊骚话提取 (the
+widest, about 36%), 明日话题展望 (about 28%) and 特别关注 (the rest). Each is a numbered
+list of white rows with a colored number circle. Quote rows put the speaker attribution
+right-aligned after the quote. The 明日话题展望 rows each get a tiny hand-drawn icon and
+the 特别关注 rows get small hand-lettered warning stickers. Scatter a few stickers, mini
+balloons and the cat mascot around these frames so the band feels drawn, not typeset.
+
+At the very bottom, draw a thin deep-navy bar with the footer line centered.
+
+Draw all of it in this style: premium cute Chinese hand-drawn infographic poster, like a well-made 小红书 group
+digest. Thick slightly wobbly dark-navy ink outlines, colored-pencil and marker texture,
+soft watercolor shading, warm off-white paper ground, bright pastel palette of blue, pink,
+mint, orange, purple and yellow, hand-drawn sparkles and stars, expressive chibi
+characters with real faces and natural poses, recurring black-cat mascot. Every frame,
+badge, ribbon and bullet is drawn by hand rather than a flat vector shape.
+
+Rules for the lettering, the most important part of the job:
+- Render every Chinese string below EXACTLY as given: same characters, same order, nothing
+  added, nothing dropped, nothing translated, no pinyin, no English captions, no emoji.
+  Every glyph must be a real, correctly-formed Chinese character, never a look-alike.
+- Set a floor on type size: no body text anywhere on the page may be smaller than the
+  topic-card bullet text. The 骚话 rows carry the longest strings on the page, so give
+  that frame the width and height its text needs at that size. If something does not fit,
+  make its frame taller or let the wording run onto more lines - never shrink the type.
+- Take extra care with dense multi-stroke characters: write each one with its correct
+  components rather than an approximation that merely looks similar in outline.
+- Text must be crisp, level, fully inside its card, and never clipped by a border or a
+  drawing.
+- Do not invent extra headings, page numbers, bylines, watermarks, logos or QR codes.
+- If a card has no content given, leave it out rather than filling it with made-up text.
+"""
+
+
+def _poster_bullets(item):
+    points = item.get("points") if isinstance(item.get("points"), list) else []
+    cleaned = [str(point).strip() for point in points if str(point or "").strip()]
+    if cleaned:
+        return cleaned
+    summary = str(item.get("summary") or item.get("reason") or "").strip()
+    return [summary] if summary else []
+
+
+def build_full_poster_prompt(digest):
+    """把整份 digest 文案编成一次性整图海报提示词。"""
+    lines = []
+    group_name = str(digest.get("group_name") or "我们的群聊").strip()
+    lines.append(f"页头群名：{group_name}")
+    lines.append("页头标题：群聊日报")
+    lines.append("页头副标语：— 各种话题一起聊 · 轻松摸鱼不孤单 —")
+    lines.append(f"页头日期：{str(digest.get('date') or '').strip()}")
+    lines.append(
+        f"页头消息数行：今日群聊总结 · {str(digest.get('message_count') or '0').strip()} 条消息"
+    )
+
+    lines.append("")
+    lines.append("栏目1 标题：今日群聊概览")
+    lead = str(digest.get("lead") or digest.get("overview") or "").strip()
+    if lead:
+        lines.append(f"栏目1 导语：{lead}")
+    topics = [item for item in (digest.get("topics") or []) if isinstance(item, dict)][:6]
+    for index, topic in enumerate(topics, start=1):
+        title = str(topic.get("title") or f"今日话题{index}").strip()
+        lines.append(f"话题卡{index} 标题：{title}")
+        for point in _poster_bullets(topic):
+            lines.append(f"话题卡{index} 要点：{point}")
+        bubble = str(topic.get("bubble") or "").strip()
+        if bubble:
+            lines.append(f"话题卡{index} 气泡台词：{bubble}")
+        visual = str(topic.get("visual_prompt") or "").strip()
+        if visual:
+            lines.append(f"话题卡{index} 漫画画面（英文，仅供作画，不要写进画面）：{visual}")
+
+    rankings = [
+        item
+        for item in (digest.get("mvp_rankings") or [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ][:3]
+    lines.append("")
+    lines.append("栏目2 标题：摸鱼大王评选")
+    if rankings:
+        for index, item in enumerate(rankings, start=1):
+            default_title = "摸鱼大王" if index == 1 else f"摸鱼第 {index} 名"
+            lines.append(f"人物卡{index} 昵称：{str(item.get('name')).strip()}")
+            lines.append(
+                f"人物卡{index} 称号：{str(item.get('title') or default_title).strip()}"
+            )
+            for point in _poster_bullets(item):
+                lines.append(f"人物卡{index} 理由：{point}")
+        if len(rankings) < 3:
+            lines.append(
+                f"人物卡说明：今天只评出 {len(rankings)} 位，"
+                f"请把这一栏排成 {len(rankings)} 张卡片并铺满整行，不要留空位、不要编造人名。"
+            )
+    else:
+        lines.append("人物卡说明：今天没有可评选的人物，请省略这一栏并让上下栏目自然衔接。")
+
+    achievements = [
+        item for item in (digest.get("achievements") or []) if isinstance(item, dict)
+    ][:6]
+    lines.append("")
+    lines.append("栏目3 标题：趣味成就颁发")
+    for index, item in enumerate(achievements, start=1):
+        award = str(item.get("award") or "今日成就").strip()
+        name = str(item.get("name") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        lines.append(f"成就卡{index} 成就名：{award}")
+        if name:
+            lines.append(f"成就卡{index} 昵称：【{name}】")
+        if reason:
+            lines.append(f"成就卡{index} 说明：{reason}")
+    if len(achievements) < 6:
+        lines.append(
+            f"成就卡说明：今天只有 {len(achievements)} 个成就，"
+            "请按实际数量排版，不要凑满 6 张。"
+        )
+
+    quotes = [item for item in (digest.get("quotes") or []) if isinstance(item, dict)][:7]
+    lines.append("")
+    lines.append("栏目4 标题：群聊骚话提取")
+    for index, item in enumerate(quotes, start=1):
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        speaker = str(item.get("speaker") or "").strip()
+        suffix = f" — {speaker}" if speaker else ""
+        lines.append(f"骚话{index}：“{text}”{suffix}")
+
+    lines.append("")
+    lines.append("栏目5 标题：明日话题展望")
+    tomorrow = digest.get("tomorrow_topics") if isinstance(digest.get("tomorrow_topics"), list) else []
+    for index, item in enumerate([str(x).strip() for x in tomorrow if str(x or "").strip()][:5], start=1):
+        lines.append(f"展望{index}：{item}")
+
+    lines.append("")
+    lines.append("栏目6 标题：特别关注")
+    special = digest.get("special_notes") if isinstance(digest.get("special_notes"), list) else []
+    for index, item in enumerate([str(x).strip() for x in special if str(x or "").strip()][:5], start=1):
+        lines.append(f"关注{index}：{item}")
+
+    lines.append("")
+    lines.append("页脚：— 生活很卷，但摸鱼很快乐 —")
+
+    topic_count = len(topics)
+    grids = {
+        1: "one full-width card",
+        2: "one column of 2 cards",
+        3: "one column of 3 cards",
+        4: "a 2-column x 2-row grid",
+        5: "a 2-column grid where the last card spans the full width",
+        6: "a 2-column x 3-row grid",
+    }
+    brief = POSTER_LAYOUT_BRIEF.format(
+        topic_count=topic_count or 1,
+        topic_grid=grids.get(topic_count, "a 2-column grid"),
+        rank_count=len(rankings) or 1,
+        ach_count=len(achievements) or 1,
+    )
+    return (
+        "You are an award-winning Chinese editorial illustrator and infographic designer.\n\n"
+        + brief
+        + "\nCONTENT TO TYPESET AND ILLUSTRATE (Chinese text is verbatim):\n"
+        + "\n".join(lines)
+    )
+
+
+def _upscale_poster(image, min_side=POSTER_MIN_SIDE):
+    """整图模式偶尔返回偏小的图，等比放大保证微信里字还看得清。"""
+    if min(image.size) >= min_side:
+        return image
+    scale = min_side / float(min(image.size))
+    target = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    return image.resize(target, Image.Resampling.LANCZOS)
+
+
+def generate_full_poster(digest, api_key, progress_callback=None,
+                         request_fn=requests.post, cancel_event=None,
+                         model=None, aspect_ratio=POSTER_ASPECT_RATIO,
+                         image_size=POSTER_IMAGE_SIZE):
+    """一次调用出整张手绘海报：文字与插画都由图片模型绘制。"""
+    if not str(api_key or "").strip():
+        raise ValueError("整图 AI 海报需要 Gemini API Key。")
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("任务已取消。")
+    _notify(progress_callback, "正在让图片模型直接绘制整张手绘海报（约 1～3 分钟）...")
+    images = _generate_images_from_prompt(
+        [digest],
+        build_full_poster_prompt(digest),
+        api_key,
+        progress_callback=progress_callback,
+        request_fn=request_fn,
+        cancel_event=cancel_event,
+        provider="gemini",
+        model=model or GEMINI_POSTER_MODEL,
+        split_sheet=False,
+        aspect_ratio=aspect_ratio,
+        image_size=image_size,
+    )
+    if not images:
+        raise RuntimeError("图片模型没有返回整张海报，请重试或改用本地排版模式。")
+    return _upscale_poster(images[0])
+
+
 def build_digest_illustration_requests(digest, detailed=False):
     """固定生成 12 格素材：六个话题、三个人物、三张栏目装饰。"""
     requests_list = []
@@ -93,9 +343,12 @@ def build_digest_illustration_requests(digest, detailed=False):
     for topic in topics[:6]:
         if isinstance(topic, dict):
             requests_list.append({**topic, "_illustration_role": "topic"})
-    while not detailed and len(requests_list) < 6:
+    while len(requests_list) < 6:
+        # 精绘模式不为空栏目付费，但仍占位，保证人物插画落在固定索引 6~8。
         requests_list.append(
-            {"visual_prompt": "friends happily chatting about everyday life"}
+            {"_skip": True}
+            if detailed
+            else {"visual_prompt": "friends happily chatting about everyday life"}
         )
 
     rankings = (
@@ -116,6 +369,8 @@ def build_digest_illustration_requests(digest, detailed=False):
             }
         )
     if detailed:
+        while len(requests_list) < 9:
+            requests_list.append({"_skip": True})
         return requests_list[:9]
     while len(requests_list) < 9:
         requests_list.append(
@@ -199,7 +454,8 @@ def _extract_gemini_image_bytes(response_data):
 
 def _generate_images_from_prompt(selected, prompt, api_key, progress_callback=None,
                                  request_fn=requests.post, cancel_event=None,
-                                 provider="gemini", model=None, split_sheet=True):
+                                 provider="gemini", model=None, split_sheet=True,
+                                 aspect_ratio="4:3", image_size="1K"):
     """执行一次图片请求；联系表模式可切片，单景模式返回整图。"""
     if provider == "gemini":
         selected_model = str(model or GEMINI_IMAGE_MODEL).strip()
@@ -216,12 +472,17 @@ def _generate_images_from_prompt(selected, prompt, api_key, progress_callback=No
             ],
             "generationConfig": {
                 "responseModalities": ["TEXT", "IMAGE"],
-                "responseFormat": {
-                    "image": {"aspectRatio": "4:3", "imageSize": "1K"}
+                # 画幅必须走 imageConfig：responseFormat.image.aspectRatio 是枚举，
+                # 传 "1:1" 这类字符串会被判 400，然后悄悄退回默认画幅。
+                "imageConfig": {
+                    "aspectRatio": aspect_ratio,
+                    "imageSize": image_size,
                 },
             },
         }
-        timeout = (20, 180)
+        # 整图海报要画满一页文字，比小插画慢得多，读超时按画布档位放宽。
+        read_timeout = {"4K": 600, "2K": 420}.get(str(image_size).upper(), 180)
+        timeout = (20, read_timeout)
         max_attempts = 3
     elif provider == "nvidia":
         endpoint = NVIDIA_IMAGE_ENDPOINT
@@ -289,7 +550,8 @@ def _generate_images_from_prompt(selected, prompt, api_key, progress_callback=No
     if provider == "gemini" and response.status_code == 400:
         detail = _response_error_detail(response)
         schema_markers = (
-            "responseformat", "imagesize", "responsemodalities",
+            "responseformat", "imageconfig", "imagesize",
+            "aspectratio", "responsemodalities",
             "unknown name", "unknown field", "invalid json payload",
         )
         if any(marker in detail.lower() for marker in schema_markers):
@@ -373,12 +635,17 @@ def generate_topic_images(topics, api_key, progress_callback=None,
         if provider != "gemini":
             raise ValueError("精致插画模式目前仅支持 Gemini 图片模型。")
         illustrations = []
-        total = len(selected)
-        for index, item in enumerate(selected, start=1):
+        total = sum(1 for item in selected if not item.get("_skip"))
+        drawn = 0
+        for item in selected:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("任务已取消。")
+            if item.get("_skip"):
+                illustrations.append(None)
+                continue
             placement = str(item.get("_illustration_role") or "topic")
-            _notify(progress_callback, f"正在精绘第 {index}/{total} 张栏目插画...")
+            drawn += 1
+            _notify(progress_callback, f"正在精绘第 {drawn}/{total} 张栏目插画...")
             illustrations.extend(
                 _generate_images_from_prompt(
                     [item],

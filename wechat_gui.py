@@ -49,12 +49,30 @@ from wechat_summary import (
     provider_default_model,
     provider_label,
 )
-from newspaper_renderer import render_newspaper
+from newspaper_renderer import render_newspaper, save_poster_image
 from topic_image_generator import (
     GEMINI_IMAGE_MODEL,
+    GEMINI_POSTER_MODEL,
     build_digest_illustration_requests,
+    generate_full_poster,
     generate_topic_images,
 )
+
+
+# 插画模式：整图海报最像手绘，本地排版保证文字准确。
+ILLUSTRATION_MODES = (
+    ("poster", "整图 AI 海报：模型直接画整页（最像手绘，1 次调用）"),
+    ("detailed", "本地排版 + 逐格精绘插画（最多 9 次调用）"),
+    ("sheet", "本地排版 + 单次联系表插画（最省钱）"),
+)
+ILLUSTRATION_MODE_LABELS = {key: label for key, label in ILLUSTRATION_MODES}
+
+
+def _illustration_mode_from_label(label):
+    for key, text in ILLUSTRATION_MODES:
+        if text == label:
+            return key
+    return "poster"
 
 
 APP_BG = "#F3F5FA"
@@ -105,11 +123,18 @@ class WeChatSummaryApp:
         self.ai_topic_images_var = tk.BooleanVar(
             value=bool(self.config.get("ai_topic_images", True))
         )
-        self.detailed_illustrations_var = tk.BooleanVar(
-            value=bool(self.config.get("detailed_illustrations", False))
+        saved_mode = str(self.config.get("illustration_mode") or "").strip()
+        if saved_mode not in ILLUSTRATION_MODE_LABELS:
+            # 兼容旧配置里的布尔开关。
+            saved_mode = "detailed" if self.config.get("detailed_illustrations") else "poster"
+        self.illustration_mode_var = tk.StringVar(
+            value=ILLUSTRATION_MODE_LABELS[saved_mode]
+        )
+        default_image_model = (
+            GEMINI_POSTER_MODEL if saved_mode == "poster" else GEMINI_IMAGE_MODEL
         )
         self.image_model_var = tk.StringVar(
-            value=str(self.config.get("image_model") or GEMINI_IMAGE_MODEL)
+            value=str(self.config.get("image_model") or default_image_model)
         )
 
         configured_provider = str(self.config.get("provider") or DEFAULT_PROVIDER)
@@ -162,6 +187,8 @@ class WeChatSummaryApp:
         self._manual_user_dir = None   # 用户手动指定的微信数据目录
 
         self._build_ui()
+        # 旧配置可能把整图模式和 flash 图片模型配在一起，整图靠 flash 写中文必然糊。
+        self._on_illustration_mode_change()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -367,15 +394,25 @@ class WeChatSummaryApp:
         self.ai_images_check.grid(
             row=1, column=0, sticky="w", pady=(10, 0)
         )
-        self.detailed_images_check = ttk.Checkbutton(
+        self.illustration_mode_combo = ttk.Combobox(
             action_row,
-            text="精致手绘模式：按栏目逐张绘制（最多 9 次调用，费用更高）",
-            variable=self.detailed_illustrations_var,
-            style="Modern.TCheckbutton",
+            textvariable=self.illustration_mode_var,
+            values=[label for _key, label in ILLUSTRATION_MODES],
+            state="readonly",
+            style="Modern.TCombobox",
         )
-        self.detailed_images_check.grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(7, 0)
+        self.illustration_mode_combo.grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(9, 0)
         )
+        self.illustration_mode_combo.bind(
+            "<<ComboboxSelected>>", self._on_illustration_mode_change
+        )
+        ttk.Label(
+            action_row,
+            text="整图模式请把图片模型选成 gemini-3-pro-image；它会自己画字，"
+                 "偶尔会写错字或漏字，重跑一次即可换一版。",
+            style="Hint.TLabel", wraplength=520,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self.btn_cancel = ttk.Button(
             action_row,
             text="取消任务",
@@ -523,11 +560,25 @@ class WeChatSummaryApp:
             self.api_entry.config(state=state)
             self.show_key_btn.config(state=state)
             self.ai_images_check.config(state=state)
-            self.detailed_images_check.config(state=state)
+            self.illustration_mode_combo.config(
+                state="readonly" if enabled else "disabled"
+            )
             self.image_model_combo.config(state="readonly" if enabled else "disabled")
             if enabled:
                 self.btn_cancel.config(state="disabled")
         self.root.after(0, _do)
+
+    def _current_illustration_mode(self):
+        return _illustration_mode_from_label(self.illustration_mode_var.get())
+
+    def _on_illustration_mode_change(self, _event=None):
+        """整图海报必须用能画字的 pro 模型，切换时顺手把图片模型对上。"""
+        mode = self._current_illustration_mode()
+        current = str(self.image_model_var.get() or "").strip()
+        if mode == "poster" and current != GEMINI_POSTER_MODEL:
+            self.image_model_var.set(GEMINI_POSTER_MODEL)
+        elif mode != "poster" and current == GEMINI_POSTER_MODEL:
+            self.image_model_var.set(GEMINI_IMAGE_MODEL)
 
     def _provider_key_from_label(self, label):
         for key, config in PROVIDERS.items():
@@ -942,7 +993,7 @@ class WeChatSummaryApp:
             messagebox.showwarning("提示", "请先填写模型名。")
             return
         use_ai_images = bool(self.ai_topic_images_var.get())
-        detailed_illustrations = bool(self.detailed_illustrations_var.get())
+        illustration_mode = self._current_illustration_mode()
         image_model = str(self.image_model_var.get() or GEMINI_IMAGE_MODEL).strip()
         image_api_key = str(self.provider_keys.get("gemini") or "").strip()
         if use_ai_images and not image_api_key:
@@ -974,13 +1025,13 @@ class WeChatSummaryApp:
         threading.Thread(
             target=self._image_thread,
             args=(idx, start_d, end_d, provider, api_key, model, output_path,
-                  use_ai_images, image_api_key, detailed_illustrations, image_model),
+                  use_ai_images, image_api_key, illustration_mode, image_model),
             daemon=True,
         ).start()
 
     def _image_thread(self, idx, start_d, end_d, provider, api_key, model,
                       output_path, use_ai_images, image_api_key,
-                      detailed_illustrations, image_model=None):
+                      illustration_mode="poster", image_model=None):
         try:
             if idx < 0 or idx >= len(self.chatrooms):
                 raise ValueError("请选择一个群聊")
@@ -1052,9 +1103,26 @@ class WeChatSummaryApp:
             )
             topic_images = []
             image_warning = ""
-            if use_ai_images:
+            poster = None
+            if use_ai_images and illustration_mode == "poster":
+                try:
+                    poster = generate_full_poster(
+                        digest,
+                        image_api_key,
+                        progress_callback=report_progress,
+                        cancel_event=self._cancel_event,
+                        model=image_model or GEMINI_POSTER_MODEL,
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    if self._cancel_event.is_set():
+                        raise
+                    image_warning = (
+                        f"{exc}\n\n已自动改用本地排版版本：文字准确，但不是整张手绘。"
+                    )
+                    report_progress("整图海报失败，正在改用本地排版...")
+            elif use_ai_images:
                 illustration_requests = build_digest_illustration_requests(
-                    digest, detailed=detailed_illustrations
+                    digest, detailed=illustration_mode == "detailed"
                 )
                 try:
                     topic_images = generate_topic_images(
@@ -1064,7 +1132,7 @@ class WeChatSummaryApp:
                     cancel_event=self._cancel_event,
                     provider="gemini",
                     model=image_model or GEMINI_IMAGE_MODEL,
-                    mode="detailed" if detailed_illustrations else "sheet",
+                    mode="detailed" if illustration_mode == "detailed" else "sheet",
                 )
                 except RuntimeError as exc:
                     if self._cancel_event.is_set():
@@ -1073,10 +1141,14 @@ class WeChatSummaryApp:
                     report_progress("AI 插画失败，正在保留内容并生成无插画版日报...")
             if self._cancel_event.is_set():
                 raise RuntimeError("任务已取消。")
-            report_progress("正在本地排版手绘日报...")
-            rendered_path = render_newspaper(
-                digest, output_path, topic_images=topic_images
-            )
+            if poster is not None:
+                report_progress("整图海报已生成，正在保存...")
+                rendered_path = save_poster_image(poster, output_path)
+            else:
+                report_progress("正在本地排版手绘日报...")
+                rendered_path = render_newspaper(
+                    digest, output_path, topic_images=topic_images
+                )
 
             def show_complete():
                 self.msg_count_label.config(text=f"共 {count} 条消息")
@@ -1085,7 +1157,7 @@ class WeChatSummaryApp:
                 if image_warning:
                     messagebox.showwarning(
                         "AI 插画未生成",
-                        "日报文字和排版已正常保存，但 AI 插画请求失败。\n\n"
+                        "日报内容已正常保存，但这次的 AI 绘图请求失败了。\n\n"
                         + image_warning,
                     )
 
@@ -1233,7 +1305,8 @@ class WeChatSummaryApp:
         cfg["api_keys"] = self.provider_keys
         cfg["models"] = self.provider_models
         cfg["ai_topic_images"] = bool(self.ai_topic_images_var.get())
-        cfg["detailed_illustrations"] = bool(self.detailed_illustrations_var.get())
+        cfg.pop("detailed_illustrations", None)
+        cfg["illustration_mode"] = self._current_illustration_mode()
         cfg["image_model"] = self.image_model_var.get().strip() or GEMINI_IMAGE_MODEL
         # 保存自定义提示词（若与默认不同）
         if self._prompt_template != DEFAULT_PROMPT_TEMPLATE:

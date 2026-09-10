@@ -1635,7 +1635,7 @@ NEWSPAPER_DIGEST_PROMPT = """\
   "headline": "12～24个字的头版标题",
   "lead": "60～100个字的今日导语",
   "topics": [
-    {{"title": "话题短标题", "summary": "40～80字，说清起因、讨论或结果", "visual_prompt": "对应话题的简短英文插画描述"}}
+    {{"title": "话题短标题", "points": ["能独立成句的短要点", "能独立成句的短要点"], "summary": "40～80字，说清起因、讨论或结果", "bubble": "这个话题里最有代表性的一句短口语", "visual_prompt": "对应话题的简短英文插画描述"}}
   ],
   "mvp_rankings": [
     {{"name": "昵称", "title": "有趣但不冒犯的称号", "reason": "30～50字理由", "visual_prompt": "对应人物气质的简短英文Q版肖像描述"}}
@@ -1643,20 +1643,23 @@ NEWSPAPER_DIGEST_PROMPT = """\
   "achievements": [
     {{"award": "趣味成就名", "name": "昵称", "reason": "20～40字理由"}}
   ],
-  "quotes": [{{"speaker": "昵称", "text": "当天真实金句"}}],
+  "quotes": [{{"speaker": "昵称", "text": "当天真实金句，不超过 30 字"}}],
   "tomorrow_topics": ["根据今天内容判断、明天可能继续讨论的话题"],
   "special_notes": ["值得提醒或特别关注的信息；无法确认时明确写可能或仅供娱乐"]
 }}
 
 要求：
 1. 为保持固定版式：topics 最多 6 个，mvp_rankings 最多 3 人，achievements 最多 6 个，quotes 最多 7 条，tomorrow_topics 和 special_notes 各最多 5 条。
-2. 宁可少写也不要把字挤得过密，所有字段都要简短。
+2. 每一条都要短，但只要当天确有真实素材，就尽量把固定栏位填满（6 个话题、6 个成就、7 条金句、明日话题与特别关注各 5 条）；素材不够时才少写，绝不用空话凑数。
+2.1 金句是版面上最长的文字，每条不超过 30 字；过长的原话请截取最有代表性的一句，不要改写成新的话。
 3. 只能使用来源总结中已有的事实和发言人，不得杜撰。
 4. 不使用 emoji、网络链接或换行符，保持报纸杂志语气。
 5. mvp_rankings 只能填写聊天记录中明确可识别、且当天确有发言或贡献的昵称；宁可只返回 1 人或 2 人，也绝不使用“群友”“某群友”“匿名”等占位名凑满 3 人。mvp_rankings 按今日存在感排序。
 6. 如果金句或趣味成就的归属不确定，可以不署名或使用“有群友提到”；禁止猜测具体是谁。
 7. visual_prompt 必须用英文描述一个有明确主体、具体动作和话题关键物件的单一漫画场景，不含姓名、文字、数字、品牌或标志；不得使用 generic chat, people talking, group chat 等泛泛描述。
 8. tomorrow_topics 是基于当天尚未结束的话题作谨慎展望；special_notes 只写安全提醒、信息局限或需要继续确认的事情，不得把猜测写成事实。
+9. points 每个话题 2～3 条，每条不超过 12 个字，必须能独立读懂；禁止把一句话拆成两半、禁止以标点开头。
+10. bubble 是可以画进漫画气泡的短口语，不超过 8 个字，尽量贴近群友原话；没有合适的就写空字符串。
 """
 
 
@@ -1682,6 +1685,28 @@ def _parse_json_object(value):
     return data
 
 
+def _topic_points(raw_points, summary, limit=3):
+    """整理话题要点；模型没给 points 时按句读切分 summary，避免逐行折断。"""
+    points = []
+    if isinstance(raw_points, list):
+        for item in raw_points:
+            text = _short_text(item, 14).lstrip("，。、；：·-— ")
+            if text and text not in points:
+                points.append(text)
+    if not points:
+        text = str(summary or "").strip()
+        chunks = [
+            chunk.strip()
+            for chunk in re.split(r"[。；;，,、!！?？]\s*", text)
+            if len(chunk.strip()) >= 4
+        ]
+        # 只有每段都短到能独立成行时才拆；否则整段当成一条，宁可长也不切断句子。
+        if chunks and all(len(chunk) <= 20 for chunk in chunks):
+            return chunks[:limit]
+        return [text] if text else []
+    return points[:limit]
+
+
 def _normalise_newspaper_digest(data, group_name, date_range, message_count):
     topics = data.get("topics") if isinstance(data.get("topics"), list) else []
     clean_topics = []
@@ -1695,6 +1720,8 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
                 {
                     "title": title or "今日重点",
                     "summary": summary,
+                    "points": _topic_points(item.get("points"), summary),
+                    "bubble": _short_text(item.get("bubble"), 10),
                     "visual_prompt": _short_text(item.get("visual_prompt"), 140),
                 }
             )
@@ -1746,7 +1773,8 @@ def _normalise_newspaper_digest(data, group_name, date_range, message_count):
     for item in raw_quotes[:7]:
         if not isinstance(item, dict):
             continue
-        text = _short_text(item.get("text"), 48)
+        # 金句是整图海报上最小最长的一栏，超过 30 字就会开始出现错字。
+        text = _short_text(item.get("text"), 30)
         if text:
             quotes.append(
                 {

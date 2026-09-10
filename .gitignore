@@ -12,3 +12,5 @@ config.json
 *.db-shm
 *.db-wal
 *.db-journal
+verify_poster_*.png
+verify_fallback_*.png
