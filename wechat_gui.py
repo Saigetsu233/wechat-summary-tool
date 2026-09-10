@@ -1001,15 +1001,22 @@ class WeChatSummaryApp:
                 cancel_event=self._cancel_event,
             )
             topic_images = []
+            image_warning = ""
             if use_ai_images:
                 illustration_requests = build_digest_illustration_requests(digest)
-                topic_images = generate_topic_images(
-                    illustration_requests,
-                    image_api_key,
-                    progress_callback=report_progress,
-                    cancel_event=self._cancel_event,
-                    provider="gemini",
-                )
+                try:
+                    topic_images = generate_topic_images(
+                        illustration_requests,
+                        image_api_key,
+                        progress_callback=report_progress,
+                        cancel_event=self._cancel_event,
+                        provider="gemini",
+                    )
+                except RuntimeError as exc:
+                    if self._cancel_event.is_set():
+                        raise
+                    image_warning = str(exc)
+                    report_progress("AI 插画失败，正在保留内容并生成无插画版日报...")
             if self._cancel_event.is_set():
                 raise RuntimeError("任务已取消。")
             report_progress("正在本地排版手绘日报...")
@@ -1021,6 +1028,12 @@ class WeChatSummaryApp:
                 self.msg_count_label.config(text=f"共 {count} 条消息")
                 self._set_status(f"图片日报已保存：{rendered_path}")
                 self._show_image_preview(rendered_path)
+                if image_warning:
+                    messagebox.showwarning(
+                        "AI 插画未生成",
+                        "日报文字和排版已正常保存，但 AI 插画请求失败。\n\n"
+                        + image_warning,
+                    )
 
             self.root.after(0, show_complete)
         except Exception as exc:

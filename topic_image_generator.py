@@ -27,6 +27,24 @@ def _notify(callback, message):
         callback(message)
 
 
+def _response_error_detail(response):
+    """提取 Google/NVIDIA 返回的可读错误，同时避免把响应无限展开。"""
+    try:
+        data = response.json()
+    except (TypeError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+            status = str(error.get("status") or "").strip()
+            if status and message:
+                return f"{status}: {message}"[:500]
+            if message or status:
+                return (message or status)[:500]
+    return str(getattr(response, "text", "") or "").strip()[:500]
+
+
 def build_contact_sheet_prompt(topics):
     selected = topics[:MAX_TOPIC_IMAGES]
     prefix = (
@@ -241,6 +259,36 @@ def generate_topic_images(topics, api_key, progress_callback=None,
     if response is None:
         raise RuntimeError("Gemini 图片请求没有收到响应，请稍后再试。")
 
+    # Gemini REST 新旧后端曾使用过不同的图片配置字段。若服务明确表示
+    # 不认识 responseFormat/imageSize，就按官方最简请求再试一次，让模型
+    # 使用默认分辨率生成图片；这不会在鉴权、计费或地域错误时盲目重试。
+    if provider == "gemini" and response.status_code == 400:
+        detail = _response_error_detail(response)
+        schema_markers = (
+            "responseformat", "imagesize", "responsemodalities",
+            "unknown name", "unknown field", "invalid json payload",
+        )
+        if any(marker in detail.lower() for marker in schema_markers):
+            _notify(progress_callback, "Gemini 图片参数版本不兼容，正在使用兼容模式...")
+            compatible_payload = {
+                "contents": [
+                    {"role": "user", "parts": [{"text": prompt}]},
+                ],
+            }
+            try:
+                response = request_fn(
+                    endpoint,
+                    headers=headers,
+                    json=compatible_payload,
+                    timeout=timeout,
+                )
+            except requests.Timeout as exc:
+                raise RuntimeError(
+                    "Gemini 图片兼容请求等待超时，请稍后重试。"
+                ) from exc
+            except requests.RequestException as exc:
+                raise RuntimeError(f"连接 Gemini 图片模型失败：{exc}") from exc
+
     if provider == "gemini":
         gemini_errors = {
             400: "Gemini 图片请求格式错误，请检查图片模型名。",
@@ -252,7 +300,9 @@ def generate_topic_images(topics, api_key, progress_callback=None,
             503: "Gemini 图片服务当前繁忙，请稍后重试。",
         }
         if response.status_code in gemini_errors:
-            raise RuntimeError(gemini_errors[response.status_code])
+            detail = _response_error_detail(response)
+            suffix = f"\nGoogle 返回：{detail}" if detail else ""
+            raise RuntimeError(gemini_errors[response.status_code] + suffix)
     else:
         if response.status_code in (401, 403):
             raise RuntimeError("NVIDIA 图片模型拒绝了 Key，请确认 Key 有权调用该模型。")

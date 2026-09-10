@@ -30,6 +30,26 @@ class _FakeResponse:
         return None
 
 
+class _ErrorResponse:
+    text = ""
+
+    def __init__(self, status_code, message):
+        self.status_code = status_code
+        self.message = message
+
+    def json(self):
+        return {
+            "error": {
+                "code": self.status_code,
+                "message": self.message,
+                "status": "INVALID_ARGUMENT",
+            }
+        }
+
+    def raise_for_status(self):
+        raise RuntimeError(self.message)
+
+
 class _GeminiFakeResponse(_FakeResponse):
     def json(self):
         return {
@@ -141,6 +161,38 @@ class TopicImageGeneratorTests(unittest.TestCase):
         )
         self.assertEqual(calls[0][1]["timeout"], (20, 180))
         self.assertEqual(len(images), 1)
+
+    def test_gemini_schema_error_retries_with_minimal_payload(self):
+        buffer = BytesIO()
+        self._sheet().save(buffer, format="JPEG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        calls = []
+
+        def fake_request(url, **kwargs):
+            calls.append((url, kwargs))
+            if len(calls) == 1:
+                return _ErrorResponse(
+                    400, "Invalid JSON payload received. Unknown name responseFormat"
+                )
+            return _GeminiFakeResponse(encoded)
+
+        images = generate_topic_images(
+            [{"title": "雪板"}], "test-key", request_fn=fake_request
+        )
+
+        self.assertEqual(len(images), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("generationConfig", calls[1][1]["json"])
+
+    def test_gemini_error_includes_google_detail(self):
+        with self.assertRaisesRegex(RuntimeError, "Only available to billed users"):
+            generate_topic_images(
+                [{"title": "雪板"}],
+                "test-key",
+                request_fn=lambda *args, **kwargs: _ErrorResponse(
+                    400, "Only available to billed users"
+                ),
+            )
 
     def test_cancelled_image_request_does_not_reach_network(self):
         cancel_event = threading.Event()
