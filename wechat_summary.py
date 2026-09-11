@@ -721,53 +721,104 @@ def select_decrypt_temp_dir(required_bytes):
     )
 
 
-def decrypt_db(db_path, enc_key_hex, temp_dir=None):
-    """流式解密微信4.x数据库，返回临时文件路径。"""
+DECRYPT_PREFIX = "wechat_summary_"
+
+
+def _decrypted_dest_path(db_path, temp_dir):
+    """按源文件的绝对路径算出固定的解密目标名，保证复用、不堆积。"""
+    tag = hashlib.md5(os.path.abspath(db_path).encode("utf-8")).hexdigest()
+    return os.path.join(temp_dir, f"{DECRYPT_PREFIX}{tag}.db")
+
+
+def _decrypted_copy_is_fresh(dest_path, source_path):
+    """已解密副本仍然可用：大小一致且不早于源文件（源有新消息则失效）。"""
+    try:
+        return (
+            os.path.exists(dest_path)
+            and os.path.getsize(dest_path) == os.path.getsize(source_path)
+            and os.path.getmtime(dest_path) >= os.path.getmtime(source_path)
+        )
+    except OSError:
+        return False
+
+
+def sweep_decrypt_temp_dir(temp_dir, keep_paths=()):
+    """清理解密临时目录里除 keep_paths 外的所有 wechat_summary_*.db。
+
+    用来回收旧版本的随机命名副本、上次崩溃残留、以及切换账号后的旧副本，
+    让临时目录始终只留当前这一套，占用固定不增长。
+    """
+    keep = {os.path.abspath(p) for p in keep_paths if p}
+    try:
+        entries = os.listdir(temp_dir)
+    except OSError:
+        return
+    for name in entries:
+        if not (name.startswith(DECRYPT_PREFIX) and name.endswith(".db")):
+            continue
+        path = os.path.abspath(os.path.join(temp_dir, name))
+        if path in keep:
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def decrypt_db(db_path, enc_key_hex, temp_dir=None, reuse=True):
+    """流式解密微信4.x数据库，返回解密后文件路径。
+
+    使用由源路径决定的固定文件名：源没变化时直接复用上次的解密副本
+    （不重复解密、不新建文件）；源有更新则原子覆盖同一个文件。
+    """
     from Crypto.Cipher import AES
 
     enc_key = bytes.fromhex(enc_key_hex)
     if temp_dir is None:
         temp_dir = select_decrypt_temp_dir(os.path.getsize(db_path))
     os.makedirs(temp_dir, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        prefix="wechat_summary_", suffix=".db", dir=temp_dir
-    )
-    os.close(fd)
+    dest_path = _decrypted_dest_path(db_path, temp_dir)
+    if reuse and _decrypted_copy_is_fresh(dest_path, db_path):
+        return dest_path
+    # 先写到 .part 再原子替换，避免中途失败留下半个损坏的副本。
+    tmp_path = dest_path + ".part"
     try:
         with open(db_path, "rb") as source, open(tmp_path, "wb") as target:
             first_page = source.read(PAGE_SZ)
             if first_page[:16] == SQLITE_HDR:
+                # 已是明文，直接复制。
                 target.write(first_page)
                 while True:
                     chunk = source.read(4 * 1024 * 1024)
                     if not chunk:
                         break
                     target.write(chunk)
-                return tmp_path
+            else:
+                source.seek(0)
+                page_number = 1
+                while True:
+                    page = source.read(PAGE_SZ)
+                    if not page:
+                        break
+                    if len(page) != PAGE_SZ:
+                        raise RuntimeError(
+                            f"数据库文件尾部不完整：第 {page_number} 页只有 {len(page)} 字节"
+                        )
 
-            source.seek(0)
-            page_number = 1
-            while True:
-                page = source.read(PAGE_SZ)
-                if not page:
-                    break
-                if len(page) != PAGE_SZ:
-                    raise RuntimeError(
-                        f"数据库文件尾部不完整：第 {page_number} 页只有 {len(page)} 字节"
-                    )
-
-                iv = page[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + 16]
-                if page_number == 1:
-                    encrypted = page[SALT_SZ: PAGE_SZ - RESERVE_SZ]
-                    decrypted = AES.new(enc_key, AES.MODE_CBC, iv).decrypt(encrypted)
-                    out_page = SQLITE_HDR + decrypted + b'\x00' * RESERVE_SZ
-                else:
-                    encrypted = page[:PAGE_SZ - RESERVE_SZ]
-                    decrypted = AES.new(enc_key, AES.MODE_CBC, iv).decrypt(encrypted)
-                    out_page = decrypted + b'\x00' * RESERVE_SZ
-                target.write(out_page[:PAGE_SZ])
-                page_number += 1
-        return tmp_path
+                    iv = page[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + 16]
+                    if page_number == 1:
+                        encrypted = page[SALT_SZ: PAGE_SZ - RESERVE_SZ]
+                        decrypted = AES.new(enc_key, AES.MODE_CBC, iv).decrypt(encrypted)
+                        out_page = SQLITE_HDR + decrypted + b'\x00' * RESERVE_SZ
+                    else:
+                        encrypted = page[:PAGE_SZ - RESERVE_SZ]
+                        decrypted = AES.new(enc_key, AES.MODE_CBC, iv).decrypt(encrypted)
+                        out_page = decrypted + b'\x00' * RESERVE_SZ
+                    target.write(out_page[:PAGE_SZ])
+                    page_number += 1
+        # 文件已关闭，再原子替换（Windows 不能替换仍打开的文件）。
+        os.replace(tmp_path, dest_path)
+        return dest_path
     except Exception:
         try:
             os.unlink(tmp_path)

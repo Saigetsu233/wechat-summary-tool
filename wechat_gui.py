@@ -37,6 +37,7 @@ from wechat_summary import (
     extract_keys_from_memory,
     decrypt_db,
     select_decrypt_temp_dir,
+    sweep_decrypt_temp_dir,
     list_chatrooms,
     list_private_chats,
     provider_model_options,
@@ -1016,13 +1017,8 @@ class WeChatSummaryApp:
                     conn.close()
             except Exception:
                 pass
-        msg_paths = getattr(self, "tmp_msg_paths", [])
-        for path in [*msg_paths, self.tmp_contact_path]:
-            if path and os.path.exists(path):
-                try:
-                    os.unlink(path)
-                except Exception:
-                    pass
+        # 不再逐个删除解密副本：文件名是固定的，会被下次复用/覆盖，
+        # 由 sweep_decrypt_temp_dir 统一收口，避免每次连接都新建、堆满 C 盘。
         self.conn_msg = []
         self.conn_contact = None
         self.tmp_msg_paths = []
@@ -1184,6 +1180,10 @@ class WeChatSummaryApp:
                     contact_db_path, contact_key, temp_dir=temp_dir
                 )
                 self.conn_contact = sqlite3.connect(self.tmp_contact_path, check_same_thread=False)
+
+        # 只保留本次这套解密副本，清掉旧版本随机命名、崩溃残留、换账号后的旧副本。
+        keep = [*self.tmp_msg_paths, self.tmp_contact_path]
+        sweep_decrypt_temp_dir(temp_dir, keep)
 
     def _load_chatrooms(self):
         self.contact_name_map = load_contact_name_map(self.conn_contact)
