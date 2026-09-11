@@ -6,6 +6,8 @@ import re
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+import platform_support
+
 
 CANVAS_SIZE = (1536, 1536)
 PAPER = "#FFFDF6"
@@ -27,22 +29,12 @@ SECTION_PALES = ("#FFF0F5", "#EEF7FF", "#EDFBF5", "#FFF7E8", "#F5F0FF", "#ECFBFC
 
 
 def _font(size, bold=False, display=False):
-    windows_fonts = Path("C:/Windows/Fonts")
-    if display:
-        candidates = [windows_fonts / "STHUPO.TTF", windows_fonts / "FZYTK.TTF"]
-    elif bold:
-        candidates = [windows_fonts / "msyhbd.ttc", windows_fonts / "simhei.ttf"]
-    else:
-        candidates = [windows_fonts / "msyh.ttc", windows_fonts / "Deng.ttf"]
-    candidates.extend(
-        [
-            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        ]
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return ImageFont.truetype(str(candidate), size=size)
+    kind = "display" if display else ("bold" if bold else "regular")
+    for candidate in platform_support.font_candidates(kind):
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except OSError:
+            continue
     return ImageFont.load_default()
 
 

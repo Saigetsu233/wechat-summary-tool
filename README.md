@@ -19,7 +19,7 @@
 - **固定手绘日报模板**：备用的本地排版路线，复刻蓝色报头、粗描边彩色分区、话题宫格、人物榜、趣味成就和底部三栏，固定输出 `1536×1536`
 - **AI 话题配图**：本地排版模式下由 Gemini 图片模型生成手绘漫画素材，再裁成栏目插画
 - **手绘风桌面界面**：与日报同一套配色的圆角卡片工作台，图标由 Pillow 现画，无外部素材
-- **免 Python 运行**：Windows EXE 可直接双击使用
+- **免 Python 运行**：Windows EXE、macOS App 均可直接使用
 - **任务可取消**：生成途中可点“取消任务”，当前网络请求结束后立即停止后续步骤
 - **自动管理临时空间**：系统盘空间不足时自动改用程序所在盘存放解密临时文件，退出时清理
 - **自定义提示词**：可修改 AI 的总结风格和格式
@@ -29,7 +29,7 @@
 
 ## 使用前提
 
-- Windows 系统（仅支持 Windows）
+- Windows 10/11，或 macOS 12+（Apple Silicon 与 Intel 均可）
 - 微信电脑版 4.0 / 4.1 已安装并**保持登录状态**（已适配 4.1 新密钥结构）
 - 推荐拥有已启用结算的 [Google AI Studio API Key](https://aistudio.google.com/apikey)；也可使用 DeepSeek API Key
 
@@ -37,11 +37,27 @@
 
 ## 下载
 
-前往 **[Releases 页面](https://github.com/Saigetsu233/wechat-summary-tool/releases/latest)**
-下载最新的 `ChatroomDigest.exe`，无需安装 Python，双击即可启动。
+前往 **[Releases 页面](https://github.com/Saigetsu233/wechat-summary-tool/releases/latest)**：
+
+- **Windows**：下载 `ChatroomDigest.exe`，无需安装 Python，双击即可启动。
+- **macOS**：下载 `ChatroomDigest-*-macOS.dmg`，拖入「应用程序」。
 
 首次启动后在左侧填入 API Key 并保存，Key 只写在本机的 `config.json` 里。
 想从源码运行见下方「从源码运行」。
+
+### macOS 自动读取需要额外权限
+
+macOS 会阻止读取其它已签名 App 的进程内存，因此自动读取微信数据库
+**必须**满足两个前提，缺一不可：
+
+1. **关闭 SIP**：重启进入恢复模式（Apple Silicon 长按开机键，Intel 开机按 ⌘R），
+   打开「终端」执行 `csrutil disable`，再重启。
+2. **以管理员权限启动**：在终端里运行
+   `sudo /Applications/ChatroomDigest.app/Contents/MacOS/ChatroomDigest`。
+   直接双击 `.app` 不是 root，自动读取会失败并给出同样的提示。
+
+这是 macOS 的系统安全限制，不是本工具能绕过的。若不愿改动系统安全设置，
+请改用 Windows 版。填好的 API Key、生成的日报与配图在两平台完全一致。
 
 ## 从源码运行
 
@@ -147,15 +163,25 @@ python verify_poster.py --open
 Key 的取用顺序是 `--key` > 环境变量 `GEMINI_API_KEY` > `config.json`。
 还可以用 `--aspect 4:5`、`--size 2K` 换画幅，或用 `--dump-digest x.json` 导出内容、改完再 `--digest x.json` 传回来。
 
-## 自己构建 EXE
+## 自己构建
 
-在 PowerShell 中运行：
+**Windows** — 在 PowerShell 中运行：
 
 ```powershell
 .\build_exe.ps1
 ```
 
-脚本会安装构建所需的 PyInstaller，并在 `dist\ChatroomDigest.exe` 生成单文件程序。EXE 版的配置保存在 `%LOCALAPPDATA%\ChatroomDigest\config.json`；首次从本项目的 `dist` 目录运行时，也会读取项目根目录已有的配置。
+在 `dist\ChatroomDigest.exe` 生成单文件程序。EXE 版配置保存在 `%LOCALAPPDATA%\ChatroomDigest\config.json`。
+
+**macOS** — 在终端运行：
+
+```bash
+bash build_app.sh v1.7.0
+```
+
+在 `dist/ChatroomDigest.app` 生成应用，并打包出 `dist/ChatroomDigest-v1.7.0-macOS.dmg`。App 版配置保存在 `~/Library/Application Support/ChatroomDigest/config.json`。
+
+发布 release 时，GitHub Actions（`.github/workflows/build-macos.yml`）会在 macOS runner 上自动构建 `.dmg` 并上传到对应 release。
 
 ---
 
@@ -213,7 +239,7 @@ A：暂不支持，目前只能总结群聊记录。
 
 - 本工具通过读取本地微信数据库工作，**不会登录你的微信账号**，也不会发送任何消息
 - 生成 AI 总结时，所选时间范围内的文本消息会发送给你选择的 Gemini 或 DeepSeek API，请确认群成员同意并遵守当地隐私法规
-- 仅支持 Windows 微信 4.0 / 4.1 版本；微信后续若再次调整内部数据库结构，可能需要同步升级提取器
+- 仅支持微信 4.0 / 4.1 版本；微信后续若再次调整内部数据库结构，可能需要同步升级提取器
 - 请勿将本工具用于非法用途
 
 ---

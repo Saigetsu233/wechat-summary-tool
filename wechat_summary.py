@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-微信群聊 AI 总结工具 - 适用于微信 4.x (Windows)
+微信群聊 AI 总结工具 - 适用于微信 4.x (Windows / macOS)
 
 使用前：
-1. 打开微信 PC 版并登录
+1. 打开微信客户端并登录
 2. 双击运行此工具
 
 依赖：pip install pycryptodome requests psutil
@@ -12,7 +12,6 @@
 import os
 import sys
 import ctypes
-import ctypes.wintypes as wt
 import hashlib
 import hmac as hmac_mod
 import struct
@@ -26,6 +25,13 @@ import requests
 import subprocess
 import time
 from urllib.parse import quote
+
+import platform_support
+from platform_support import IS_WINDOWS, IS_MACOS
+
+# ctypes.wintypes 只有 Windows 才有，非 Windows 导入会直接失败。
+if IS_WINDOWS:
+    import ctypes.wintypes as wt
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 常量
@@ -49,14 +55,8 @@ CONFIG_CIPHER_MAX_BLOB = 1024
 MAX_USER_ADDRESS = 0x0000800000000000
 
 SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
-IS_FROZEN = bool(getattr(sys, "frozen", False))
-if IS_FROZEN:
-    APP_DATA_DIR = os.path.join(
-        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
-        "ChatroomDigest",
-    )
-else:
-    APP_DATA_DIR = SOURCE_DIR
+IS_FROZEN = platform_support.IS_FROZEN
+APP_DATA_DIR = platform_support.app_data_dir()
 CONFIG_FILE = os.path.join(APP_DATA_DIR, "config.json")
 DEFAULT_PROVIDER = "gemini"
 PROVIDERS = {
@@ -124,6 +124,9 @@ def find_wechat_data_dir():
     失败时退化为多路径扫描。
     多账号时取 message_0.db 最近修改的（当前登录账号）。
     """
+    if IS_MACOS:
+        import wechat_macos
+        return wechat_macos.find_wechat_data_dir()
     # ── 方法一：从进程打开文件直接找（最可靠，适用任意路径）──
     user_dir = _find_user_dir_from_process()
     if user_dir:
@@ -260,13 +263,93 @@ def find_db_storage(user_dir):
 # 2. 从内存提取密钥（微信 4.x）
 # ─────────────────────────────────────────────────────────────────────────────
 
-class MBI(ctypes.Structure):
-    _fields_ = [
-        ("BaseAddress", ctypes.c_uint64), ("AllocationBase", ctypes.c_uint64),
-        ("AllocationProtect", wt.DWORD), ("_pad1", wt.DWORD),
-        ("RegionSize", ctypes.c_uint64), ("State", wt.DWORD),
-        ("Protect", wt.DWORD), ("Type", wt.DWORD), ("_pad2", wt.DWORD),
-    ]
+# ─────────────────────────────────────────────────────────────────────────────
+# 进程内存读取：抽象成 reader 接口，两个平台各给一个后端。
+# 密钥解析与校验（Config.Cipher、HMAC）是平台无关的纯逻辑，两端共用。
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MemoryAccessError(RuntimeError):
+    """无法打开或读取目标进程内存（权限不足、进程消失等）。"""
+
+
+if IS_WINDOWS:
+
+    class MBI(ctypes.Structure):
+        _fields_ = [
+            ("BaseAddress", ctypes.c_uint64), ("AllocationBase", ctypes.c_uint64),
+            ("AllocationProtect", wt.DWORD), ("_pad1", wt.DWORD),
+            ("RegionSize", ctypes.c_uint64), ("State", wt.DWORD),
+            ("Protect", wt.DWORD), ("Type", wt.DWORD), ("_pad2", wt.DWORD),
+        ]
+
+    class _WindowsProcessReader:
+        """用 kernel32 读取 Weixin.exe 进程内存。"""
+
+        def __init__(self, pid):
+            self.kernel32 = ctypes.windll.kernel32
+            self.handle = self.kernel32.OpenProcess(0x0010 | 0x0400, False, pid)
+            if not self.handle:
+                raise MemoryAccessError(f"无法打开进程 {pid}（权限不足？）")
+
+        def regions(self):
+            regions = []
+            address = 0
+            mbi = MBI()
+            while address < 0x7FFFFFFFFFFF:
+                queried = self.kernel32.VirtualQueryEx(
+                    self.handle, ctypes.c_uint64(address),
+                    ctypes.byref(mbi), ctypes.sizeof(mbi),
+                )
+                if queried == 0:
+                    break
+                if (
+                    mbi.State == MEM_COMMIT
+                    and mbi.Protect in READABLE
+                    and 0 < mbi.RegionSize < 500 * 1024 * 1024
+                ):
+                    regions.append((mbi.BaseAddress, mbi.RegionSize))
+                next_address = mbi.BaseAddress + mbi.RegionSize
+                if next_address <= address:
+                    break
+                address = next_address
+            return regions
+
+        def read(self, address, size):
+            if size <= 0:
+                return b""
+            try:
+                buf = ctypes.create_string_buffer(size)
+            except (MemoryError, OverflowError):
+                return None
+            nread = ctypes.c_size_t(0)
+            ok = self.kernel32.ReadProcessMemory(
+                self.handle, ctypes.c_uint64(address), buf, size,
+                ctypes.byref(nread),
+            )
+            if not ok and nread.value == 0:
+                return None
+            return buf.raw[:nread.value]
+
+        def close(self):
+            if self.handle:
+                self.kernel32.CloseHandle(self.handle)
+                self.handle = None
+
+
+def _iter_reader_chunks(reader, regions, chunk_size=2 * 1024 * 1024, overlap=0):
+    """分块读取内存，避免为较大的内存区域一次性分配巨型缓冲区。"""
+    for base, region_size in regions:
+        offset = 0
+        tail = b""
+        while offset < region_size:
+            current_size = min(chunk_size, region_size - offset)
+            chunk = reader.read(base + offset, current_size) or b""
+            data = tail + chunk
+            data_base = base + offset - len(tail)
+            if data:
+                yield data_base, data
+            tail = data[-overlap:] if overlap and data else b""
+            offset += current_size
 
 
 def verify_enc_key(enc_key, page1):
@@ -279,95 +362,6 @@ def verify_enc_key(enc_key, page1):
     hm = hmac_mod.new(mac_key, hmac_data, hashlib.sha512)
     hm.update(struct.pack("<I", 1))
     return hm.digest() == stored_hmac
-
-
-def get_weixin_pids():
-    """获取所有 Weixin.exe 进程 PID，按内存占用降序排列"""
-    r = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
-        capture_output=True, text=True
-    )
-    pids = []
-    for line in r.stdout.strip().split('\n'):
-        if not line.strip():
-            continue
-        parts = line.strip('"').split('","')
-        if len(parts) >= 5:
-            try:
-                pid = int(parts[1])
-                mem = int(parts[4].replace(',', '').replace(' K', '').strip() or '0')
-                pids.append((pid, mem))
-            except ValueError:
-                pass
-    pids.sort(key=lambda x: x[1], reverse=True)
-    return pids
-
-
-def _read_process_memory(kernel32, process_handle, address, size):
-    """读取一小段进程内存；读取失败时返回 None。"""
-    if size <= 0:
-        return b""
-    try:
-        buf = ctypes.create_string_buffer(size)
-    except (MemoryError, OverflowError):
-        return None
-    nread = ctypes.c_size_t(0)
-    ok = kernel32.ReadProcessMemory(
-        process_handle,
-        ctypes.c_uint64(address),
-        buf,
-        size,
-        ctypes.byref(nread),
-    )
-    if not ok and nread.value == 0:
-        return None
-    return buf.raw[:nread.value]
-
-
-def _enumerate_readable_regions(kernel32, process_handle):
-    """枚举目标进程中可读、已提交的内存区域。"""
-    regions = []
-    address = 0
-    mbi = MBI()
-    while address < 0x7FFFFFFFFFFF:
-        queried = kernel32.VirtualQueryEx(
-            process_handle,
-            ctypes.c_uint64(address),
-            ctypes.byref(mbi),
-            ctypes.sizeof(mbi),
-        )
-        if queried == 0:
-            break
-        if (
-            mbi.State == MEM_COMMIT
-            and mbi.Protect in READABLE
-            and 0 < mbi.RegionSize < 500 * 1024 * 1024
-        ):
-            regions.append((mbi.BaseAddress, mbi.RegionSize))
-        next_address = mbi.BaseAddress + mbi.RegionSize
-        if next_address <= address:
-            break
-        address = next_address
-    return regions
-
-
-def _iter_process_chunks(kernel32, process_handle, regions,
-                         chunk_size=2 * 1024 * 1024, overlap=0):
-    """分块读取内存，避免为较大的内存区域一次性分配巨型缓冲区。"""
-    for base, region_size in regions:
-        offset = 0
-        tail = b""
-        while offset < region_size:
-            current_size = min(chunk_size, region_size - offset)
-            chunk = _read_process_memory(
-                kernel32, process_handle, base + offset, current_size
-            ) or b""
-            data = tail + chunk
-            data_base = base + offset - len(tail)
-            if data:
-                yield data_base, data
-            tail = data[-overlap:] if overlap and data else b""
-            offset += current_size
 
 
 def _unpack_u64(data, offset):
@@ -442,144 +436,149 @@ def _match_key_candidate(key_hex, embedded_salt, db_files,
     return found
 
 
-def _scan_config_cipher_process(kernel32, pid, db_files,
-                                key_map, remaining_salts):
+def _scan_config_cipher_reader(reader, db_files, key_map, remaining_salts):
     """微信 4.1.10+：只读扫描 WCDB Config.Cipher 对象。"""
-    process_handle = kernel32.OpenProcess(0x0010 | 0x0400, False, pid)
-    if not process_handle:
-        return {"needles": 0, "nodes": 0, "candidates": 0, "verified": 0}
-
     stats = {"needles": 0, "nodes": 0, "candidates": 0, "verified": 0}
-    try:
-        regions = _enumerate_readable_regions(kernel32, process_handle)
-        needle_addresses = set()
-        for data_base, data in _iter_process_chunks(
-            kernel32,
-            process_handle,
-            regions,
-            overlap=len(CONFIG_CIPHER_NAME) - 1,
-        ):
-            pos = data.find(CONFIG_CIPHER_NAME)
+    regions = reader.regions()
+
+    needle_addresses = set()
+    for data_base, data in _iter_reader_chunks(
+        reader, regions, overlap=len(CONFIG_CIPHER_NAME) - 1
+    ):
+        pos = data.find(CONFIG_CIPHER_NAME)
+        while pos >= 0:
+            needle_addresses.add(data_base + pos)
+            pos = data.find(CONFIG_CIPHER_NAME, pos + 1)
+
+    stats["needles"] = len(needle_addresses)
+    if not needle_addresses:
+        return stats
+
+    pointer_patterns = [
+        struct.pack("<Q", address) + struct.pack("<Q", len(CONFIG_CIPHER_NAME))
+        for address in needle_addresses
+    ]
+    seen_nodes = set()
+    seen_candidates = set()
+
+    for data_base, data in _iter_reader_chunks(reader, regions, overlap=0x80):
+        if not remaining_salts:
+            break
+        for pattern in pointer_patterns:
+            pos = data.find(pattern)
             while pos >= 0:
-                needle_addresses.add(data_base + pos)
-                pos = data.find(CONFIG_CIPHER_NAME, pos + 1)
-
-        stats["needles"] = len(needle_addresses)
-        if not needle_addresses:
-            return stats
-
-        pointer_patterns = [
-            struct.pack("<Q", address) + struct.pack("<Q", len(CONFIG_CIPHER_NAME))
-            for address in needle_addresses
-        ]
-        seen_nodes = set()
-        seen_candidates = set()
-
-        for data_base, data in _iter_process_chunks(
-            kernel32, process_handle, regions, overlap=0x80
-        ):
-            if not remaining_salts:
-                break
-            for pattern in pointer_patterns:
-                pos = data.find(pattern)
-                while pos >= 0:
-                    node_base = data_base + pos - 0x10
-                    if node_base in seen_nodes:
-                        pos = data.find(pattern, pos + 1)
-                        continue
-                    seen_nodes.add(node_base)
-
-                    node = _read_process_memory(
-                        kernel32, process_handle, node_base, 0x50
-                    )
-                    if not node or len(node) < 0x40:
-                        pos = data.find(pattern, pos + 1)
-                        continue
-                    if (
-                        _unpack_u64(node, 0x10) not in needle_addresses
-                        or _unpack_u64(node, 0x18) != len(CONFIG_CIPHER_NAME)
-                    ):
-                        pos = data.find(pattern, pos + 1)
-                        continue
-
-                    config_pointer = _unpack_u64(node, 0x28)
-                    if not 0x10000 <= config_pointer < MAX_USER_ADDRESS:
-                        pos = data.find(pattern, pos + 1)
-                        continue
-                    stats["nodes"] += 1
-
-                    config_object = _read_process_memory(
-                        kernel32, process_handle, config_pointer + 0x88, 0x28
-                    )
-                    if not config_object or len(config_object) < 0x18:
-                        pos = data.find(pattern, pos + 1)
-                        continue
-                    blob_pointer = _unpack_u64(config_object, 0x08)
-                    blob_size = _unpack_u64(config_object, 0x10)
-                    if not (
-                        0 < blob_size <= CONFIG_CIPHER_MAX_BLOB
-                        and 0x10000 <= blob_pointer < MAX_USER_ADDRESS
-                    ):
-                        pos = data.find(pattern, pos + 1)
-                        continue
-
-                    blob = _read_process_memory(
-                        kernel32, process_handle, blob_pointer, int(blob_size)
-                    )
-                    for key_hex, salt_hex in _config_cipher_candidates(blob):
-                        candidate = (key_hex, salt_hex)
-                        if candidate in seen_candidates:
-                            continue
-                        seen_candidates.add(candidate)
-                        stats["candidates"] += 1
-                        stats["verified"] += _match_key_candidate(
-                            key_hex,
-                            salt_hex,
-                            db_files,
-                            key_map,
-                            remaining_salts,
-                        )
+                node_base = data_base + pos - 0x10
+                if node_base in seen_nodes:
                     pos = data.find(pattern, pos + 1)
-    finally:
-        kernel32.CloseHandle(process_handle)
+                    continue
+                seen_nodes.add(node_base)
+
+                node = reader.read(node_base, 0x50)
+                if not node or len(node) < 0x40:
+                    pos = data.find(pattern, pos + 1)
+                    continue
+                if (
+                    _unpack_u64(node, 0x10) not in needle_addresses
+                    or _unpack_u64(node, 0x18) != len(CONFIG_CIPHER_NAME)
+                ):
+                    pos = data.find(pattern, pos + 1)
+                    continue
+
+                config_pointer = _unpack_u64(node, 0x28)
+                if not 0x10000 <= config_pointer < MAX_USER_ADDRESS:
+                    pos = data.find(pattern, pos + 1)
+                    continue
+                stats["nodes"] += 1
+
+                config_object = reader.read(config_pointer + 0x88, 0x28)
+                if not config_object or len(config_object) < 0x18:
+                    pos = data.find(pattern, pos + 1)
+                    continue
+                blob_pointer = _unpack_u64(config_object, 0x08)
+                blob_size = _unpack_u64(config_object, 0x10)
+                if not (
+                    0 < blob_size <= CONFIG_CIPHER_MAX_BLOB
+                    and 0x10000 <= blob_pointer < MAX_USER_ADDRESS
+                ):
+                    pos = data.find(pattern, pos + 1)
+                    continue
+
+                blob = reader.read(blob_pointer, int(blob_size))
+                for key_hex, salt_hex in _config_cipher_candidates(blob):
+                    candidate = (key_hex, salt_hex)
+                    if candidate in seen_candidates:
+                        continue
+                    seen_candidates.add(candidate)
+                    stats["candidates"] += 1
+                    stats["verified"] += _match_key_candidate(
+                        key_hex, salt_hex, db_files, key_map, remaining_salts,
+                    )
+                pos = data.find(pattern, pos + 1)
     return stats
 
 
-def _scan_legacy_key_process(kernel32, pid, regions, db_files,
-                             key_map, remaining_salts):
+def _scan_legacy_key_reader(reader, db_files, key_map, remaining_salts):
     """微信 4.0.x 兼容路径：扫描明文 x'<key><salt>'。"""
-    process_handle = kernel32.OpenProcess(0x0010 | 0x0400, False, pid)
-    if not process_handle:
-        return 0
     hex_re = re.compile(rb"x'([0-9a-fA-F]{64,192})'")
     seen = set()
     found = 0
-    try:
-        for _base, data in _iter_process_chunks(
-            kernel32, process_handle, regions, overlap=256
-        ):
-            if not remaining_salts:
-                break
-            for match in hex_re.finditer(data):
-                hex_run = match.group(1).decode("ascii").lower()
-                key_hex = hex_run[:64]
-                salt_hex = hex_run[64:96] if len(hex_run) >= 96 else None
-                candidate = (key_hex, salt_hex)
-                if candidate in seen:
-                    continue
-                seen.add(candidate)
-                found += _match_key_candidate(
-                    key_hex, salt_hex, db_files, key_map, remaining_salts
-                )
-    finally:
-        kernel32.CloseHandle(process_handle)
+    for _base, data in _iter_reader_chunks(reader, reader.regions(), overlap=256):
+        if not remaining_salts:
+            break
+        for match in hex_re.finditer(data):
+            hex_run = match.group(1).decode("ascii").lower()
+            key_hex = hex_run[:64]
+            salt_hex = hex_run[64:96] if len(hex_run) >= 96 else None
+            candidate = (key_hex, salt_hex)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            found += _match_key_candidate(
+                key_hex, salt_hex, db_files, key_map, remaining_salts
+            )
     return found
+
+
+def get_weixin_pids():
+    """返回微信进程 PID，按内存占用降序（占用最大的通常是主进程）。"""
+    if IS_MACOS:
+        import wechat_macos
+        return wechat_macos.list_wechat_pids()
+    r = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True
+    )
+    pids = []
+    for line in r.stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = line.strip('"').split('","')
+        if len(parts) >= 5:
+            try:
+                pid = int(parts[1])
+                mem = int(parts[4].replace(',', '').replace(' K', '').strip() or '0')
+                pids.append((pid, mem))
+            except ValueError:
+                pass
+    pids.sort(key=lambda x: x[1], reverse=True)
+    return pids
+
+
+def _open_process_reader(pid):
+    """按平台打开进程内存 reader；失败返回 None。"""
+    try:
+        if IS_MACOS:
+            import wechat_macos
+            return wechat_macos.MacProcessReader(pid)
+        if IS_WINDOWS:
+            return _WindowsProcessReader(pid)
+    except MemoryAccessError:
+        return None
+    raise RuntimeError(f"不支持在 {platform_support.platform_label()} 上读取进程内存。")
 
 
 def extract_keys_from_memory(db_storage_dir):
     """从微信进程内存中自动提取数据库密钥，兼容微信 4.0/4.1。"""
-    kernel32 = ctypes.windll.kernel32
-
     # 收集所有 .db 文件及其 salt
     db_files = []
     salt_to_dbs = {}
@@ -608,7 +607,7 @@ def extract_keys_from_memory(db_storage_dir):
 
     pids = get_weixin_pids()
     if not pids:
-        raise RuntimeError("未找到 Weixin.exe 进程，请先打开微信并登录！")
+        raise RuntimeError("未找到微信进程，请先打开微信并登录！")
 
     key_map = {}  # salt_hex -> enc_key_hex
     remaining_salts = set(salt_to_dbs.keys())
@@ -617,9 +616,16 @@ def extract_keys_from_memory(db_storage_dir):
     for pid, mem_kb in pids:
         if not remaining_salts:
             break
-        stats = _scan_config_cipher_process(
-            kernel32, pid, db_files, key_map, remaining_salts
-        )
+        reader = _open_process_reader(pid)
+        if reader is None:
+            print(f"  PID={pid}：无法打开进程内存（权限不足？）")
+            continue
+        try:
+            stats = _scan_config_cipher_reader(
+                reader, db_files, key_map, remaining_salts
+            )
+        finally:
+            reader.close()
         print(
             f"  PID={pid} ({mem_kb//1024}MB)："
             f"配置标记 {stats['needles']}，候选 {stats['candidates']}，"
@@ -632,16 +638,15 @@ def extract_keys_from_memory(db_storage_dir):
         for pid, mem_kb in pids:
             if not remaining_salts:
                 break
-            process_handle = kernel32.OpenProcess(0x0010 | 0x0400, False, pid)
-            if not process_handle:
+            reader = _open_process_reader(pid)
+            if reader is None:
                 continue
             try:
-                regions = _enumerate_readable_regions(kernel32, process_handle)
+                found = _scan_legacy_key_reader(
+                    reader, db_files, key_map, remaining_salts
+                )
             finally:
-                kernel32.CloseHandle(process_handle)
-            found = _scan_legacy_key_process(
-                kernel32, pid, regions, db_files, key_map, remaining_salts
-            )
+                reader.close()
             print(f"  PID={pid}：旧版扫描验证通过 {found}")
 
     return key_map, db_files, salt_to_dbs

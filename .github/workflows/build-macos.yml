@@ -1,0 +1,74 @@
+name: Build macOS app
+
+# 发布 release 时自动构建 .dmg 并上传到该 release；
+# 也可手动触发，为指定 tag 补构建。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要构建并上传到的 release tag（如 v1.7.0）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: 确定 tag
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 构建 .app 与 .dmg
+        run: bash build_app.sh "${{ steps.ref.outputs.tag }}"
+
+      - name: 安装测试依赖
+        run: python3 -m pip install pytest pytest-asyncio
+
+      - name: macOS 导入检查（在真机上验证 mach 后端可导入）
+        run: |
+          python3 -c "import platform_support, wechat_macos, wechat_summary, ui_theme, newspaper_renderer, topic_image_generator; print('macOS 导入 OK, INFO_COUNT=', wechat_macos._INFO_COUNT)"
+
+      - name: 平台无关测试（跳过需要显示器的 GUI 测试）
+        run: python3 -m pytest tests -q --ignore=tests/test_gui_review.py
+
+      - name: 冒烟启动（无显示环境属尽力而为）
+        run: |
+          ./dist/ChatroomDigest.app/Contents/MacOS/ChatroomDigest &
+          APP_PID=$!
+          sleep 8
+          if kill -0 "$APP_PID" 2>/dev/null; then
+            echo "启动正常，进程存活"
+            kill "$APP_PID" || true
+          else
+            echo "::warning::App 在 8 秒内退出（无显示环境下可能属正常，仅供参考）"
+          fi
+
+      - name: 上传 .dmg 到 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.ref.outputs.tag }}" \
+            dist/ChatroomDigest-*-macOS.dmg --clobber
+
+      - name: 归档构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/ChatroomDigest-*-macOS.dmg

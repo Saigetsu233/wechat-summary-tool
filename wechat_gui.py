@@ -54,6 +54,11 @@ from wechat_summary import (
     provider_label,
 )
 import ui_theme as theme
+from platform_support import open_path as theme_open, IS_MACOS as theme_is_macos_flag
+
+
+def theme_is_macos():
+    return theme_is_macos_flag
 from digest_templates import TEMPLATES, get_template
 from newspaper_renderer import render_newspaper, save_poster_image
 from topic_image_generator import (
@@ -533,7 +538,7 @@ class WeChatSummaryApp:
         self.result_tabs.add(self.image_result, text='  图片日报  ')
         self.image_result.create_text(30, 35, anchor='nw', text='好看的头版，还差你点一下生成。', fill=MUTED)
         self.image_result.bind('<Configure>', self._fit_result_image)
-        self.image_result.bind('<Double-Button-1>', lambda e: os.startfile(self._result_image_path)
+        self.image_result.bind('<Double-Button-1>', lambda e: theme_open(self._result_image_path)
                                if getattr(self, '_result_image_path', None) else None)
         self.result_text = scrolledtext.ScrolledText(
             text_shell, wrap="word", state="disabled", bd=0,
@@ -956,6 +961,23 @@ class WeChatSummaryApp:
         self._set_status("正在初始化...")
         threading.Thread(target=self._init_thread, daemon=True).start()
 
+    def _key_failure_hint(self):
+        """密钥读取失败时的提示；macOS 上多半是权限问题，单独说明。"""
+        if theme_is_macos():
+            return (
+                "已找到微信数据库，但没有读取到密钥。\n\n"
+                "macOS 读取微信进程内存需要更高权限：\n"
+                "1. 关闭 SIP：重启进入恢复模式，终端执行 csrutil disable；\n"
+                "2. 用管理员权限启动本程序：在终端里 sudo 运行；\n"
+                "3. 确认微信已登录并保持运行。\n\n"
+                "若不想改动系统安全设置，也可在别处导出聊天记录后手动分析。"
+            )
+        return (
+            "已找到微信数据库，但没有读取到可验证的数据库密钥。\n\n"
+            "请确认微信已登录并保持运行；如果微信刚升级过，"
+            "请完全退出微信、重新打开并登录后再试。"
+        )
+
     def _init_thread(self):
         try:
             # 清理旧连接
@@ -986,10 +1008,7 @@ class WeChatSummaryApp:
             key_map, db_files, salt_to_dbs = extract_keys_from_memory(db_storage)
             if not key_map:
                 self.root.after(0, lambda: messagebox.showerror(
-                    "密钥读取失败",
-                    "已找到微信数据库，但没有读取到可验证的数据库密钥。\n\n"
-                    "请确认微信已登录并保持运行；如果微信刚升级过，"
-                    "请完全退出微信、重新打开并登录后再试。"
+                    "密钥读取失败", self._key_failure_hint()
                 ))
                 return
             self.key_map = key_map
@@ -1786,7 +1805,7 @@ class WeChatSummaryApp:
         ttk.Button(
             buttons,
             text="打开原图",
-            command=lambda: os.startfile(str(image_path)),
+            command=lambda: theme_open(image_path),
             width=14,
         ).pack(side="left", padx=6)
         ttk.Button(

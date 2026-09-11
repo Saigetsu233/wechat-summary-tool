@@ -1,0 +1,5 @@
+# 保证跨平台脚本以 LF 存储并检出，避免在 macOS/Linux 上因 CRLF 失效。
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf

@@ -9,6 +9,8 @@ from tkinter import font as tkfont
 
 from PIL import Image, ImageDraw, ImageTk
 
+import platform_support
+
 
 # 与日报海报同一套配色，但桌面端使用更克制的工作台底色。
 PAPER = "#F4F7FB"
@@ -42,20 +44,19 @@ def _available(root):
 
 
 def pick_font(root, *candidates):
-    """挑第一个装了的字体族，都没有就退回微软雅黑。"""
+    """挑第一个装了的字体族，都没有就退回系统默认中文字体。"""
     families = _available(root)
     for name in candidates:
         if name.lower() in families:
             return name
-    return "微软雅黑"
+    return platform_support.default_ui_family()
 
 
 def fonts(root):
-    """界面用到的三档字体：现代标题、清晰小标题、正文。"""
+    """界面用到的三档字体：标题、小标题、正文，按平台取候选。"""
     return {
-        "display": pick_font(root, "Segoe UI Semibold", "Aptos Display", "微软雅黑 UI", "微软雅黑"),
-        "round": pick_font(root, "Segoe UI", "微软雅黑 UI", "微软雅黑"),
-        "body": pick_font(root, "Segoe UI", "微软雅黑", "Deng", "等线"),
+        kind: pick_font(root, *platform_support.ui_font_families(kind))
+        for kind in ("display", "round", "body")
     }
 
 
@@ -298,7 +299,7 @@ def step_badge(text, accent, size=38):
     from PIL import ImageFont
 
     font = None
-    for candidate in ("C:/Windows/Fonts/msyhbd.ttc", "C:/Windows/Fonts/simhei.ttf"):
+    for candidate in platform_support.font_candidates("bold"):
         try:
             font = ImageFont.truetype(candidate, size=int(S * 0.46))
             break
