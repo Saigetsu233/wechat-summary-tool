@@ -167,6 +167,11 @@ class WeChatSummaryApp:
         saved_template = self.config.get('digest_template', 'handdrawn')
         self.template_var = tk.StringVar(value=get_template(saved_template)['name'])
         self.preview_before_image_var = tk.BooleanVar(value=bool(self.config.get('preview_before_image', True)))
+        # 开启后：每次生成完图片，就把本次解密出的临时数据库删掉（更省空间/更私密，下次生成需重新连接）。
+        self.clean_temp_after_generate_var = tk.BooleanVar(
+            value=bool(self.config.get('clean_temp_after_generate', False))
+        )
+        self._decrypt_temp_dir = None
         stored_profiles = self.config.get("member_profiles")
         self.member_profiles = stored_profiles if isinstance(stored_profiles, dict) else {}
         self._initialized = False
@@ -529,6 +534,10 @@ class WeChatSummaryApp:
         self.preview_check = ttk.Checkbutton(action_row, text="出图前预览并编辑",
             variable=self.preview_before_image_var, style="Modern.TCheckbutton")
         self.preview_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self.clean_temp_check = ttk.Checkbutton(
+            action_row, text="生成后清理解密临时文件（更省空间，下次生成需重新连接）",
+            variable=self.clean_temp_after_generate_var, style="Modern.TCheckbutton")
+        self.clean_temp_check.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.ai_images_check = ttk.Checkbutton(
             self.drawing_settings,
             text="启用 AI 绘图（关闭后使用经典本地排版，不调用图片接口）",
@@ -860,6 +869,7 @@ class WeChatSummaryApp:
             self.template_combo.config(state='readonly' if enabled else 'disabled')
             self.btn_redraw.config(state="normal" if enabled and self._last_digest else "disabled")
             self.preview_check.config(state=state)
+            self.clean_temp_check.config(state=state)
             self.btn_manual.config(state=state)
             self.btn_summarize.config(
                 state="normal" if enabled and self._initialized else "disabled"
@@ -1184,6 +1194,38 @@ class WeChatSummaryApp:
         # 只保留本次这套解密副本，清掉旧版本随机命名、崩溃残留、换账号后的旧副本。
         keep = [*self.tmp_msg_paths, self.tmp_contact_path]
         sweep_decrypt_temp_dir(temp_dir, keep)
+        self._decrypt_temp_dir = temp_dir  # 供“生成后清理”彻底删除本次副本
+
+    def _purge_decrypt_cache(self):
+        """按“生成后清理”开关，关闭连接并删除本次解密出的临时数据库。
+
+        删完会回到未连接状态，下次生成前需重新点「自动连接」。
+        """
+        paths = [*getattr(self, "tmp_msg_paths", []), self.tmp_contact_path]
+        temp_dir = getattr(self, "_decrypt_temp_dir", None)
+        self._cleanup_connections()  # 先关连接，Windows 才能删掉打开中的文件
+        for path in paths:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        if temp_dir:
+            sweep_decrypt_temp_dir(temp_dir, keep_paths=[])
+        self._decrypt_temp_dir = None
+        self._initialized = False
+        self._last_summary_key = None
+        self._last_summary_text = ""
+        self.chatrooms = []
+        self._all_chats = {"group": [], "private": []}
+        try:
+            self.chatroom_combo.config(values=[], state="disabled")
+            self.path_label.config(
+                text="已清理解密临时文件，下次生成请重新点「自动连接」",
+                foreground=MUTED,
+            )
+        except tk.TclError:
+            pass
 
     def _load_chatrooms(self):
         self.contact_name_map = load_contact_name_map(self.conn_contact)
@@ -1551,6 +1593,8 @@ class WeChatSummaryApp:
             self.root.after(0, lambda: self._display_result(full_text))
             self.root.after(0, lambda: self.msg_count_label.config(text=f"共 {n} 条消息"))
             self._set_status("总结完成！")
+            if self.clean_temp_after_generate_var.get():
+                self.root.after(0, self._purge_decrypt_cache)
 
         except Exception as e:
             err_msg = str(e)
@@ -1802,6 +1846,11 @@ class WeChatSummaryApp:
                         "AI 插画未生成",
                         "日报内容已正常保存，但这次的 AI 绘图请求失败了。\n\n"
                         + image_warning,
+                    )
+                if self.clean_temp_after_generate_var.get():
+                    self._purge_decrypt_cache()
+                    self._set_status(
+                        f"图片日报已保存：{rendered_path}（已清理解密临时文件）"
                     )
 
             self.root.after(0, show_complete)
@@ -2079,6 +2128,7 @@ class WeChatSummaryApp:
         cfg["image_model"] = self.image_model_var.get().strip() or GEMINI_IMAGE_MODEL
         cfg["member_profiles"] = self.member_profiles
         cfg["preview_before_image"] = self.preview_before_image_var.get()
+        cfg["clean_temp_after_generate"] = self.clean_temp_after_generate_var.get()
         cfg['digest_template'] = self._template_id()
         # 保存自定义提示词（若与默认不同）
         if self._prompt_template != DEFAULT_PROMPT_TEMPLATE:
