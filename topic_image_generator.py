@@ -114,14 +114,14 @@ width, edge to edge - it is not nested inside the main area's right column. Keep
 page margins tight and even; no large empty gaps anywhere.
 
 At the top, draw a deep-navy rounded banner. Left: a white speech-bubble icon, then the
-group name and the words 群聊日报 on ONE single line in a chunky rounded Chinese display
+group name and the report title (页头标题) on ONE single line in a chunky rounded Chinese display
 face (shrink the type as needed to keep it on one line), with the tagline line directly
 underneath. Centre-right: the date in large type, and the message-count line just below
 it. Far right, inside the banner: a chibi black cat mascot with a laptop and a mug, plus
 one tiny hand-lettered sticker.
 
 Below the banner, on the left, filling about 46% of the page width, draw a blue rounded frame titled
-今日群聊概览 in a numbered pill header, the 导语 paragraph below it, then EXACTLY
+the overview heading (栏目1 标题) in a numbered pill header, the 导语 paragraph below it, then EXACTLY
 {topic_count} topic card(s) laid out in {topic_grid}, sized so they fill the frame with no
 empty slot. Every topic card carries its own pastel fill and thick colored border, a
 filled circle with its number, the topic title in that card's accent color, its bullet
@@ -189,16 +189,19 @@ def build_full_poster_prompt(digest):
     """把整份 digest 文案编成一次性整图海报提示词。"""
     lines = []
     group_name = str(digest.get("group_name") or "我们的群聊").strip()
+    title_label = str(digest.get("title_label") or "群聊日报").strip()
+    count_label = str(digest.get("count_label") or "今日群聊总结").strip()
+    overview_label = str(digest.get("overview_label") or "今日群聊概览").strip()
     lines.append(f"页头群名：{group_name}")
-    lines.append("页头标题：群聊日报")
+    lines.append(f"页头标题：{title_label}")
     lines.append("页头副标语：— 各种话题一起聊 · 轻松摸鱼不孤单 —")
     lines.append(f"页头日期：{str(digest.get('date') or '').strip()}")
     lines.append(
-        f"页头消息数行：今日群聊总结 · {str(digest.get('message_count') or '0').strip()} 条消息"
+        f"页头消息数行：{count_label} · {str(digest.get('message_count') or '0').strip()} 条消息"
     )
 
     lines.append("")
-    lines.append("栏目1 标题：今日群聊概览")
+    lines.append(f"栏目1 标题：{overview_label}")
     lead = str(digest.get("lead") or digest.get("overview") or "").strip()
     if lead:
         lines.append(f"栏目1 导语：{lead}")

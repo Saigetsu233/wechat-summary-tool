@@ -294,11 +294,13 @@ def render_newspaper(digest, output_path, topic_images=None):
     draw.rectangle((0, 112, width, 126), fill=NAVY_DARK)
     _draw_chat_icon(draw, 22, 29)
     group_name = _clean(digest.get("group_name")) or "我们的群聊"
+    title_label = _clean(digest.get("title_label")) or "群聊日报"
+    count_label = _clean(digest.get("count_label")) or "今日群聊总结"
     title_font = _font(48, True, True)
-    _draw_lines(draw, _wrap(draw, f"{group_name}  群聊日报", title_font, 980, 1), (101, 23), title_font, WHITE, 0)
+    _draw_lines(draw, _wrap(draw, f"{group_name}  {title_label}", title_font, 980, 1), (101, 23), title_font, WHITE, 0)
     draw.text((108, 82), "—  各种话题一起聊 · 轻松摸鱼不孤单  —", font=_font(19, True), fill=WHITE)
     draw.text((1512, 24), _clean(digest.get("date")) or "TODAY", font=_font(27, True), fill=WHITE, anchor="ra")
-    draw.text((1512, 67), f"今日群聊总结 · {_clean(digest.get('message_count')) or '0'} 条消息", font=_font(17), fill=WHITE, anchor="ra")
+    draw.text((1512, 67), f"{count_label} · {_clean(digest.get('message_count')) or '0'} 条消息", font=_font(17), fill=WHITE, anchor="ra")
     _sparkles(draw, 1450, 97, WHITE)
 
     margin, gap = 16, 14
@@ -306,7 +308,7 @@ def render_newspaper(digest, output_path, topic_images=None):
     left_right, right_left = 712, 726
 
     _outlined_round_rect(draw, (margin, top, left_right, upper_bottom), 18, "#F0FAFF", BLUE, width=3, shadow=False)
-    _section_header(draw, (margin + 1, top + 1, left_right - 1, top + 60), 1, "今日群聊概览", BLUE)
+    _section_header(draw, (margin + 1, top + 1, left_right - 1, top + 60), 1, _clean(digest.get("overview_label")) or "今日群聊概览", BLUE)
     lead_font = _font(17)
     _draw_lines(draw, _wrap(draw, digest.get("lead") or digest.get("overview") or "今日群聊精彩纷呈。", lead_font, 656, 3), (margin + 18, top + 72), lead_font, INK, 4)
     topics = [item for item in (digest.get("topics") or []) if isinstance(item, dict)][:6]

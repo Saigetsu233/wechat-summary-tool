@@ -67,16 +67,57 @@ PROVIDERS = {
             "{model}:generateContent"
         ),
         "default_model": "gemini-3.8-flash",
+        "models": [
+            "gemini-3.8-flash",
+            "gemini-3.8-pro",
+            "gemini-3-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ],
     },
     "deepseek": {
         "label": "DeepSeek 官方",
         "endpoint": "https://api.deepseek.com/v1/chat/completions",
         "default_model": "deepseek-chat",
+        "models": ["deepseek-chat", "deepseek-reasoner"],
+    },
+    "openai": {
+        "label": "OpenAI",
+        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "default_model": "gpt-4o-mini",
+        "models": [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "gpt-4.1",
+            "o4-mini",
+        ],
+    },
+    "openrouter": {
+        "label": "OpenRouter（聚合各大模型）",
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "default_model": "openai/gpt-4o-mini",
+        "models": [
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "anthropic/claude-3.5-sonnet",
+            "anthropic/claude-sonnet-4",
+            "google/gemini-2.5-flash",
+            "deepseek/deepseek-chat",
+            "qwen/qwen-2.5-72b-instruct",
+            "meta-llama/llama-3.3-70b-instruct",
+        ],
     },
     "nvidia": {
         "label": "NVIDIA API Catalog",
         "endpoint": "https://integrate.api.nvidia.com/v1/chat/completions",
         "default_model": "deepseek-ai/deepseek-v4-flash-0731",
+        "models": [
+            "deepseek-ai/deepseek-v4-flash-0731",
+            "deepseek-ai/deepseek-r1",
+            "qwen/qwen2.5-72b-instruct",
+            "meta/llama-3.3-70b-instruct",
+        ],
     },
 }
 DEEPSEEK_REQUEST_TIMEOUT = (15, 90)
@@ -746,6 +787,38 @@ def get_chatroom_table(chatroom_id):
     return "Msg_" + hashlib.md5(chatroom_id.encode()).hexdigest()
 
 
+def conversation_table(username):
+    """按会话 user_name 计算消息表名；群聊与私聊通用，不改写 user_name。
+
+    调用方需传入 Name2Id 里的完整 user_name（群聊自带 @chatroom 后缀，
+    私聊是原始 wxid），因此不会与 get_chatroom_table 的补后缀行为冲突。
+    """
+    return "Msg_" + hashlib.md5(str(username).encode()).hexdigest()
+
+
+def build_scope_labels(days, chat_kind="group"):
+    """根据天数与会话类型生成日报上的措辞。
+
+    chat_kind: "group" 群聊 / "private" 私聊或单聊。
+    days<=1 用“今日”，多日用“近 N 日”，避免多日日报仍写“今日”。
+    """
+    noun = "群聊" if chat_kind == "group" else "聊天"
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 1
+    if days <= 1:
+        count_label = f"今日{noun}总结"
+    else:
+        count_label = f"近 {days} 日{noun}总结"
+    return {
+        "noun": noun,
+        "count_label": count_label,
+        "title_label": f"{noun}日报",
+        "overview_label": f"{noun}概览",
+    }
+
+
 def _message_connections(conn_msg):
     """把单连接或多连接统一为连接列表，兼容旧调用。"""
     if conn_msg is None:
@@ -775,6 +848,47 @@ def list_chatrooms(conn_msg, conn_session=None):
                 continue
             counts[chatroom_id] = counts.get(chatroom_id, 0) + count
 
+    return sorted(counts.items(), key=lambda item: item[1], reverse=True)
+
+
+# 私聊列表里要排除的系统/服务账号（非真人对话）。
+_PRIVATE_CHAT_EXCLUDE = {
+    "filehelper", "weixin", "fmessage", "medianote", "floatbottle",
+    "newsapp", "qqmail", "tmessage", "qmessage", "notifymessage",
+    "notification_messages", "helper_entry", "brandsessionholder",
+}
+
+
+def list_private_chats(conn_msg):
+    """列出私聊/单聊会话（非 @chatroom），跨分库合计消息数。
+
+    过滤掉公众号（gh_ 前缀）和常见系统账号；返回 [(username, count), ...]。
+    """
+    counts = {}
+    for conn in _message_connections(conn_msg):
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT user_name FROM Name2Id "
+                "WHERE user_name NOT LIKE '%@chatroom' "
+                "AND user_name NOT LIKE '%@openim'"
+            )
+            names = [row[0] for row in cur.fetchall()]
+        except sqlite3.Error:
+            continue
+        for username in names:
+            if not username or username in _PRIVATE_CHAT_EXCLUDE:
+                continue
+            if username.startswith("gh_"):  # 公众号
+                continue
+            table = conversation_table(username)
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                count = cur.fetchone()[0]
+            except sqlite3.Error:
+                continue
+            if count:
+                counts[username] = counts.get(username, 0) + count
     return sorted(counts.items(), key=lambda item: item[1], reverse=True)
 
 
@@ -1092,7 +1206,7 @@ def _split_sender_prefix(content, sender_username=""):
 
 def _collect_text_rows(conn_msg, chatroom_id, start_ts, end_ts=None):
     """收集文本消息并保留发送者 username，跨分库合并、去重、排序。"""
-    table = get_chatroom_table(chatroom_id)
+    table = conversation_table(chatroom_id)
     rows = []
     for shard_index, conn in enumerate(_message_connections(conn_msg)):
         cur = conn.cursor()
@@ -1419,6 +1533,16 @@ def provider_default_model(provider):
     if not config:
         raise ValueError(f"不支持的 AI 服务商：{provider}")
     return str(config["default_model"])
+
+
+def provider_model_options(provider):
+    """返回该服务商的常用模型列表，供下拉框预填；用户仍可自行输入其它模型。"""
+    config = PROVIDERS.get(provider) or {}
+    models = list(config.get("models") or [])
+    default = str(config.get("default_model") or "")
+    if default and default not in models:
+        models.insert(0, default)
+    return models
 
 
 def _chat_completion(api_key, prompt, max_tokens=2000,
@@ -1899,7 +2023,7 @@ def _topic_points(raw_points, summary, limit=3):
 
 
 def _normalise_newspaper_digest(
-    data, group_name, date_range, message_count, member_genders=None
+    data, group_name, date_range, message_count, member_genders=None, labels=None
 ):
     member_genders = member_genders if isinstance(member_genders, dict) else {}
     topics = data.get("topics") if isinstance(data.get("topics"), list) else []
@@ -1989,10 +2113,15 @@ def _normalise_newspaper_digest(
         if _short_text(item, 48)
     ] if isinstance(data.get("special_notes"), list) else []
 
+    labels = labels or build_scope_labels(1, "group")
     return {
         "date": _short_text(date_range, 32),
         "group_name": _short_text(group_name, 24),
         "message_count": str(int(message_count)),
+        "count_label": labels.get("count_label", "今日群聊总结"),
+        "title_label": labels.get("title_label", "群聊日报"),
+        "overview_label": labels.get("overview_label", "群聊概览"),
+        "chat_noun": labels.get("noun", "群聊"),
         "headline": _short_text(data.get("headline"), 28) or "今日群聊，重点都在这里",
         "lead": _short_text(data.get("lead"), 130),
         "topics": clean_topics,
@@ -2014,7 +2143,7 @@ def _normalise_newspaper_digest(
 def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
                         provider=DEFAULT_PROVIDER, model=None,
                         progress_callback=None, cancel_event=None,
-                        member_genders=None):
+                        member_genders=None, labels=None):
     """把已提炼的文字总结压缩为单页图片所需的结构化字段。"""
     if not str(summary or "").strip():
         raise ValueError("没有可用于生成图片日报的总结内容。")
@@ -2051,7 +2180,7 @@ def ai_newspaper_digest(summary, api_key, group_name, date_range, message_count,
         )
         data = _parse_json_object(response)
         return _normalise_newspaper_digest(
-            data, group_name, date_range, message_count, gender_hints
+            data, group_name, date_range, message_count, gender_hints, labels
         )
     except Exception as exc:
         raise RuntimeError(f"图片日报内容生成失败：{exc}") from exc

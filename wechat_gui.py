@@ -38,6 +38,9 @@ from wechat_summary import (
     decrypt_db,
     select_decrypt_temp_dir,
     list_chatrooms,
+    list_private_chats,
+    provider_model_options,
+    build_scope_labels,
     load_contact_name_map,
     load_group_member_name_map,
     load_contact_gender_map,
@@ -138,7 +141,9 @@ class WeChatSummaryApp:
         self.conn_contact = None
         self.tmp_msg_paths = []
         self.tmp_contact_path = None
-        self.chatrooms = []   # [(chatroom_id, count, display_name), ...]
+        self.chatrooms = []   # 当前显示的会话列表 [(id, count, display), ...]
+        self._all_chats = {"group": [], "private": []}  # 两类会话缓存
+        self.chat_kind = "group"  # "group" 群聊日报 / "private" 聊天日报
         self.contact_name_map = {}
         self.group_member_name_map = {}
         self.contact_gender_map = {}
@@ -319,10 +324,41 @@ class WeChatSummaryApp:
         range_holder = theme.HandCard(left, accent=PINK, pad=13)
         range_holder.pack(fill="x", pady=(0, 12))
         range_card = range_holder.body
-        self._card_heading(range_card, "2", "选择内容", "群聊与日期范围", PINK)
-        ttk.Label(range_card, text="群聊", style="FieldLabel.TLabel").pack(
-            anchor="w", pady=(10, 4)
+        self._card_heading(range_card, "2", "选择内容", "群聊 / 聊天与日期范围", PINK)
+
+        # 群聊日报 / 聊天日报 切换
+        self.chat_kind_var = tk.StringVar(value="group")
+        kind_row = tk.Frame(range_card, bg=CARD_BG)
+        kind_row.pack(fill="x", pady=(10, 2))
+        self.kind_group_btn = ttk.Radiobutton(
+            kind_row, text="群聊日报", value="group",
+            variable=self.chat_kind_var, style="Segment.Toolbutton",
+            command=self._on_chat_kind_change,
         )
+        self.kind_group_btn.pack(side="left")
+        self.kind_private_btn = ttk.Radiobutton(
+            kind_row, text="聊天日报", value="private",
+            variable=self.chat_kind_var, style="Segment.Toolbutton",
+            command=self._on_chat_kind_change,
+        )
+        self.kind_private_btn.pack(side="left", padx=(6, 0))
+
+        self.chat_list_label = ttk.Label(
+            range_card, text="选择群聊", style="FieldLabel.TLabel"
+        )
+        self.chat_list_label.pack(anchor="w", pady=(10, 4))
+
+        # 搜索框：会话太多时按名字过滤
+        self.chat_search_var = tk.StringVar()
+        self.chat_search_entry = ttk.Entry(
+            range_card, textvariable=self.chat_search_var,
+            style="Modern.TEntry",
+        )
+        self.chat_search_entry.pack(fill="x", pady=(0, 6))
+        self.chat_search_entry.bind("<KeyRelease>", self._on_chat_search)
+        self._add_placeholder(self.chat_search_entry, self.chat_search_var,
+                              "🔍 输入名字过滤…")
+
         self.chatroom_var = tk.StringVar()
         self.chatroom_combo = ttk.Combobox(
             range_card, textvariable=self.chatroom_var, state="disabled",
@@ -375,10 +411,18 @@ class WeChatSummaryApp:
         ttk.Label(self.api_frame, text="模型", style="FieldLabel.TLabel").pack(
             anchor="w", pady=(9, 4)
         )
-        self.model_entry = ttk.Entry(
-            self.api_frame, textvariable=self.model_var, style="Modern.TEntry"
+        # 可编辑下拉框：预填该服务商的常用模型，也允许手动输入其它模型名
+        self.model_entry = ttk.Combobox(
+            self.api_frame, textvariable=self.model_var,
+            values=provider_model_options(self.current_provider),
+            style="Modern.TCombobox",
         )
         self.model_entry.pack(fill="x")
+        ttk.Label(
+            self.api_frame,
+            text="可从下拉选常用模型，也可直接输入其它模型名。",
+            style="Hint.TLabel", wraplength=300,
+        ).pack(anchor="w", pady=(4, 0))
         ttk.Label(self.api_frame, text="API Key", style="FieldLabel.TLabel").pack(
             anchor="w", pady=(9, 4)
         )
@@ -719,6 +763,15 @@ class WeChatSummaryApp:
                   background=[("active", CARD_BG)],
                   indicatorcolor=[("selected", GREEN), ("pressed", GREEN)])
 
+        # 群聊/聊天 分段切换：选中填粉底白字，未选中奶油底
+        style.configure("Segment.Toolbutton", font=(round_face, 10, "bold"),
+                        padding=(16, 7), background=theme.PAPER_DEEP,
+                        foreground=INK, borderwidth=0, focusthickness=0,
+                        anchor="center")
+        style.map("Segment.Toolbutton",
+                  background=[("selected", PINK), ("active", "#EFE7D5")],
+                  foreground=[("selected", "white")])
+
     def _card_heading(self, parent, number, title, subtitle, accent=None):
         """卡片标题：手绘序号贴纸 + 圆润标题 + 灰色副标题。"""
         accent = PRIMARY
@@ -804,11 +857,14 @@ class WeChatSummaryApp:
             self.chatroom_combo.config(
                 state="readonly" if enabled and self._initialized else "disabled"
             )
+            self.chat_search_entry.config(state=state)
+            self.kind_group_btn.config(state=state)
+            self.kind_private_btn.config(state=state)
             self.btn_member_profiles.config(
                 state="normal" if enabled and self._initialized else "disabled"
             )
             self.provider_combo.config(state="readonly" if enabled else "disabled")
-            self.model_entry.config(state=state)
+            self.model_entry.config(state="normal" if enabled else "disabled")
             self.api_entry.config(state=state)
             self.show_key_btn.config(state=state)
             self.ai_images_check.config(state=state)
@@ -847,6 +903,7 @@ class WeChatSummaryApp:
         selected = self._provider_key_from_label(self.provider_var.get())
         self.current_provider = selected
         self.api_key_var.set(str(self.provider_keys.get(selected, "")))
+        self.model_entry.config(values=provider_model_options(selected))
         self.model_var.set(
             str(self.provider_models.get(selected) or provider_default_model(selected))
         )
@@ -1102,26 +1159,88 @@ class WeChatSummaryApp:
                 self.conn_contact = sqlite3.connect(self.tmp_contact_path, check_same_thread=False)
 
     def _load_chatrooms(self):
-        rooms = list_chatrooms(self.conn_msg)
         self.contact_name_map = load_contact_name_map(self.conn_contact)
         self.group_member_name_map = load_group_member_name_map(self.conn_contact)
         self.contact_gender_map = load_contact_gender_map(self.conn_contact)
-        self.chatrooms = []
-        for cr_id, count in rooms:
-            nick = self.contact_name_map.get(
-                cr_id, cr_id.replace("@chatroom", "")
-            )
-            display = f"{nick}  （{count} 条消息）"
-            self.chatrooms.append((cr_id, count, display))
+
+        group_list = []
+        for cr_id, count in list_chatrooms(self.conn_msg):
+            nick = self.contact_name_map.get(cr_id, cr_id.replace("@chatroom", ""))
+            group_list.append((cr_id, count, f"{nick}  （{count} 条消息）"))
+
+        private_list = []
+        for user_name, count in list_private_chats(self.conn_msg):
+            nick = self.contact_name_map.get(user_name, user_name)
+            private_list.append((user_name, count, f"{nick}  （{count} 条消息）"))
+
+        self._all_chats = {"group": group_list, "private": private_list}
+        self.chatrooms = list(self._all_chats.get(self.chat_kind, group_list))
+
+    def _current_chat_source(self):
+        return self._all_chats.get(self.chat_kind, [])
 
     def _populate_chatroom_combo(self):
+        """按当前会话类型 + 搜索词刷新下拉框；self.chatrooms 即为过滤后列表。"""
+        query = str(self.chat_search_var.get() or "").strip().lower()
+        if query == "🔍 输入名字过滤…".lower():
+            query = ""
+        source = self._current_chat_source()
+        if query:
+            self.chatrooms = [c for c in source if query in c[2].lower()]
+        else:
+            self.chatrooms = list(source)
         values = [c[2] for c in self.chatrooms]
         self.chatroom_combo["values"] = values
-        self.chatroom_combo.config(state="readonly")
+        self.chatroom_combo.config(state="readonly" if values else "disabled")
         if values:
             self.chatroom_combo.current(0)
-        self.btn_summarize.config(state="normal")
-        self.btn_image.config(state="normal")
+        else:
+            self.chatroom_var.set("")
+        has_any = bool(self._all_chats.get("group") or self._all_chats.get("private"))
+        state = "normal" if has_any else "disabled"
+        self.btn_summarize.config(state=state)
+        self.btn_image.config(state=state)
+
+    def _on_chat_kind_change(self):
+        """群聊/聊天切换：换数据源，清空搜索，刷新列表与措辞。"""
+        self.chat_kind = self.chat_kind_var.get()
+        self._clear_placeholder_state(self.chat_search_entry)
+        self.chat_search_var.set("")
+        noun = "群聊" if self.chat_kind == "group" else "聊天"
+        self.chat_list_label.config(text=f"选择{noun}")
+        self._set_placeholder(self.chat_search_entry, self.chat_search_var,
+                              "🔍 输入名字过滤…")
+        if self._initialized:
+            self._populate_chatroom_combo()
+
+    def _on_chat_search(self, _event=None):
+        if getattr(self.chat_search_entry, "_placeholder_on", False):
+            return
+        if self._initialized:
+            self._populate_chatroom_combo()
+
+    # ── 搜索框占位符 ────────────────────────────────────────────────────
+    def _add_placeholder(self, entry, var, text):
+        entry._placeholder_text = text
+        self._set_placeholder(entry, var, text)
+        entry.bind("<FocusIn>", lambda e: self._clear_placeholder_state(entry, var))
+        entry.bind("<FocusOut>", lambda e: self._restore_placeholder(entry, var))
+
+    def _set_placeholder(self, entry, var, text):
+        var.set(text)
+        entry._placeholder_on = True
+
+    def _clear_placeholder_state(self, entry, var=None):
+        if getattr(entry, "_placeholder_on", False):
+            entry._placeholder_on = False
+            if var is not None:
+                var.set("")
+
+    def _restore_placeholder(self, entry, var):
+        if not str(var.get() or "").strip():
+            self._set_placeholder(entry, var, getattr(entry, "_placeholder_text", ""))
+            if self._initialized:
+                self._populate_chatroom_combo()
 
     def _sender_name_map_for_room(self, chatroom_id):
         """合并联系人备注、自动群昵称和用户手动名片；群昵称优先。"""
@@ -1454,12 +1573,14 @@ class WeChatSummaryApp:
             )
             return
 
+        chat_kind = self.chat_kind
+        noun = "群聊" if chat_kind == "group" else "聊天"
         output_path = filedialog.asksaveasfilename(
             defaultextension=".png",
             filetypes=[("PNG 图片", "*.png")],
             initialfile=(
                 f"{_safe_filename_part(self.chatrooms[idx][2].split('（')[0])}"
-                f"_群聊日报_{start_d:%Y%m%d}.png"
+                f"_{noun}日报_{start_d:%Y%m%d}.png"
             ),
             title="保存单页图片日报",
         )
@@ -1476,13 +1597,14 @@ class WeChatSummaryApp:
             target=self._image_thread,
             args=(idx, start_d, end_d, provider, api_key, model, output_path,
                   use_ai_images, image_api_key, illustration_mode, image_model,
-                  self.preview_before_image_var.get()),
+                  self.preview_before_image_var.get(), chat_kind),
             daemon=True,
         ).start()
 
     def _image_thread(self, idx, start_d, end_d, provider, api_key, model,
                       output_path, use_ai_images, image_api_key,
-                      illustration_mode="poster", image_model=None, preview_first=False):
+                      illustration_mode="poster", image_model=None,
+                      preview_first=False, chat_kind="group"):
         try:
             if idx < 0 or idx >= len(self.chatrooms):
                 raise ValueError("请选择一个群聊")
@@ -1542,6 +1664,7 @@ class WeChatSummaryApp:
                 self._last_summary_text = summary
 
             date_range = f"{start_d} 至 {end_d}"
+            days_span = (end_d - start_d).days + 1
             digest = ai_newspaper_digest(
                 summary,
                 api_key,
@@ -1555,6 +1678,7 @@ class WeChatSummaryApp:
                 member_genders=self._member_gender_hints(
                     chatroom_id, sender_name_map
                 ),
+                labels=build_scope_labels(days_span, chat_kind),
             )
             if preview_first:
                 digest = self._review_digest(digest)
