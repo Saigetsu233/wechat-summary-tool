@@ -307,6 +307,9 @@ def build_full_poster_prompt(digest):
         rank_count=len(rankings) or 1,
         ach_count=len(achievements) or 1,
     )
+    from digest_templates import template_layout_brief, get_template
+    if get_template(digest.get('template_id')).get('brief'):
+        brief = template_layout_brief(digest.get('template_id'))
     return (
         "You are an award-winning Chinese editorial illustrator and infographic designer.\n\n"
         + brief

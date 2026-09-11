@@ -20,7 +20,7 @@ INK = "#18263D"
 MUTED = "#64748B"
 LINE = "#D8E1EC"
 
-BLUE = "#2878F0"
+BLUE = "#6260DC"
 PINK = "#E64D77"
 GREEN = "#149B73"
 ORANGE = "#E99A29"
@@ -393,7 +393,4 @@ class HandCard(tk.Canvas):
             fill=self._bg, outline=LINE, width=1, tags="card_bg",
         )
         # 只保留一条窄窄的色带，作为不同步骤的视觉识别。
-        self.create_rectangle(
-            1, 1, width - 4, 5, fill=self._accent, outline="", tags="card_bg"
-        )
         self.tag_lower("card_bg")
