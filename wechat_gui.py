@@ -74,19 +74,30 @@ from topic_image_generator import (
 
 
 # 插画模式：整图海报最像手绘，本地排版保证文字准确。
+# 每项：(key, 界面文案, 后端排版模式, 图片来源)
+#   后端模式 poster=整图海报 / detailed=逐格 / sheet=联系表
+#   来源 gemini(付费) / nvidia(免费需key) / pollinations(免key) / ""(不出图)
 ILLUSTRATION_MODES = (
-    ("poster", "整图 AI 海报：模型直接画整页（最像手绘，1 次调用）"),
-    ("detailed", "本地排版 + 逐格精绘插画（最多 9 次调用）"),
-    ("sheet", "本地排版 + 单次联系表插画（最省钱）"),
+    ("poster", "整图 AI 海报（Gemini 付费·最像手绘）", "poster", "gemini"),
+    ("free_pollin", "本地排版 + 免费插画（Pollinations·免 key）", "detailed", "pollinations"),
+    ("free_nvidia", "本地排版 + 免费插画（NVIDIA·需免费 key）", "detailed", "nvidia"),
+    ("detailed", "本地排版 + Gemini 逐格精绘（付费）", "detailed", "gemini"),
+    ("sheet", "本地排版 + Gemini 联系表（付费·省钱）", "sheet", "gemini"),
 )
-ILLUSTRATION_MODE_LABELS = {key: label for key, label in ILLUSTRATION_MODES}
+ILLUSTRATION_MODE_LABELS = {row[0]: row[1] for row in ILLUSTRATION_MODES}
+_ILLUSTRATION_SPEC = {row[0]: (row[2], row[3]) for row in ILLUSTRATION_MODES}
 
 
 def _illustration_mode_from_label(label):
-    for key, text in ILLUSTRATION_MODES:
-        if text == label:
-            return key
+    for row in ILLUSTRATION_MODES:
+        if row[1] == label:
+            return row[0]
     return "poster"
+
+
+def illustration_spec(key):
+    """返回 (后端排版模式, 图片来源)。"""
+    return _ILLUSTRATION_SPEC.get(key, ("poster", "gemini"))
 
 
 APP_BG = theme.PAPER
@@ -529,7 +540,7 @@ class WeChatSummaryApp:
         self.illustration_mode_combo = ttk.Combobox(
             self.drawing_settings,
             textvariable=self.illustration_mode_var,
-            values=[label for _key, label in ILLUSTRATION_MODES],
+            values=[row[1] for row in ILLUSTRATION_MODES],
             state="readonly",
             style="Modern.TCombobox",
         )
@@ -558,8 +569,9 @@ class WeChatSummaryApp:
         self.image_model_combo.pack(side="left")
         ttk.Label(
             self.drawing_settings,
-            text="模板用于整图 AI 海报；本地排版仍使用经典样式。AI 写字可能有误，"
-                 "请检查成图。重画会再次调用图片接口并可能产生费用。",
+            text="不想配 Key？选「免费插画（Pollinations）」即可免 key 出图；"
+                 "「免费插画（NVIDIA）」需一个免费的 NVIDIA Key。免费插画只画无字小图，"
+                 "版面文字仍由程序绘制，不会乱码。整图 AI 海报最像手绘但需 Gemini 付费 Key。",
             style="Hint.TLabel", wraplength=560,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(7, 0))
         self.btn_cancel = ttk.Button(
@@ -871,22 +883,37 @@ class WeChatSummaryApp:
             self.illustration_mode_combo.config(
                 state="readonly" if enabled else "disabled"
             )
-            self.image_model_combo.config(state="readonly" if enabled else "disabled")
+            # 图片模型框只在 Gemini 来源时可用。
             if enabled:
+                _mode, src = self._current_illustration_spec()
+                self.image_model_combo.config(
+                    state="readonly" if src == "gemini" else "disabled"
+                )
                 self.btn_cancel.config(state="disabled")
+            else:
+                self.image_model_combo.config(state="disabled")
         self.root.after(0, _do)
 
     def _current_illustration_mode(self):
         return _illustration_mode_from_label(self.illustration_mode_var.get())
 
+    def _current_illustration_spec(self):
+        return illustration_spec(self._current_illustration_mode())
+
     def _on_illustration_mode_change(self, _event=None):
-        """整图海报必须用能画字的 pro 模型，切换时顺手把图片模型对上。"""
-        mode = self._current_illustration_mode()
+        """整图海报必须用能画字的 pro 模型；免费来源不用图片模型框。"""
+        key = self._current_illustration_mode()
+        backend_mode, source = illustration_spec(key)
         current = str(self.image_model_var.get() or "").strip()
-        if mode == "poster" and current != GEMINI_POSTER_MODEL:
+        if key == "poster" and current != GEMINI_POSTER_MODEL:
             self.image_model_var.set(GEMINI_POSTER_MODEL)
-        elif mode != "poster" and current == GEMINI_POSTER_MODEL:
+        elif source == "gemini" and current == GEMINI_POSTER_MODEL:
             self.image_model_var.set(GEMINI_IMAGE_MODEL)
+        # 图片模型框只对 Gemini 来源有意义，其它来源禁用以免误解。
+        if hasattr(self, "image_model_combo"):
+            self.image_model_combo.config(
+                state="readonly" if source == "gemini" else "disabled"
+            )
 
     def _provider_key_from_label(self, label):
         for key, config in PROVIDERS.items():
@@ -1563,13 +1590,27 @@ class WeChatSummaryApp:
             return
         use_ai_images = bool(self.ai_topic_images_var.get())
         illustration_mode = self._current_illustration_mode()
+        backend_mode, image_source = self._current_illustration_spec()
         image_model = str(self.image_model_var.get() or GEMINI_IMAGE_MODEL).strip()
-        image_api_key = str(self.provider_keys.get("gemini") or "").strip()
-        if use_ai_images and not image_api_key:
+        # 按图片来源取对应的 key：Gemini/NVIDIA 需要 key，Pollinations 免 key。
+        if image_source == "nvidia":
+            image_api_key = str(self.provider_keys.get("nvidia") or "").strip()
+        elif image_source == "pollinations":
+            image_api_key = ""
+        else:
+            image_api_key = str(self.provider_keys.get("gemini") or "").strip()
+        if use_ai_images and image_source == "gemini" and not image_api_key:
             messagebox.showwarning(
                 "需要 Gemini Key",
-                "AI 话题插画使用 Gemini 图片模型。请先切换到 Google Gemini，"
-                "填写并保存一次 Key；之后使用其他文字模型时也能复用。",
+                "该插画方式使用 Gemini 图片模型。请先切换到 Google Gemini，"
+                "填写并保存一次 Key；或改选「免费插画」方式。",
+            )
+            return
+        if use_ai_images and image_source == "nvidia" and not image_api_key:
+            messagebox.showwarning(
+                "需要 NVIDIA Key",
+                "NVIDIA 免费画图需要一个免费的 NVIDIA API Key。请先切换到 "
+                "NVIDIA API Catalog，填写并保存一次 Key；或改选 Pollinations（免 key）。",
             )
             return
 
@@ -1597,14 +1638,16 @@ class WeChatSummaryApp:
             target=self._image_thread,
             args=(idx, start_d, end_d, provider, api_key, model, output_path,
                   use_ai_images, image_api_key, illustration_mode, image_model,
-                  self.preview_before_image_var.get(), chat_kind),
+                  self.preview_before_image_var.get(), chat_kind,
+                  backend_mode, image_source),
             daemon=True,
         ).start()
 
     def _image_thread(self, idx, start_d, end_d, provider, api_key, model,
                       output_path, use_ai_images, image_api_key,
                       illustration_mode="poster", image_model=None,
-                      preview_first=False, chat_kind="group"):
+                      preview_first=False, chat_kind="group",
+                      backend_mode="poster", image_source="gemini"):
         try:
             if idx < 0 or idx >= len(self.chatrooms):
                 raise ValueError("请选择一个群聊")
@@ -1687,7 +1730,7 @@ class WeChatSummaryApp:
             digest['template_id'] = getattr(self, '_active_template_id', 'handdrawn')
             self._last_digest = copy.deepcopy(digest)
             self._render_digest(digest, output_path, use_ai_images, image_api_key,
-                                illustration_mode, image_model)
+                                backend_mode, image_model, image_source)
         except Exception as exc:
             self._set_status(f"图片日报生成失败：{exc}")
             if not self._cancel_event.is_set():
@@ -1697,14 +1740,14 @@ class WeChatSummaryApp:
             self._set_ui_enabled(True)
 
     def _render_digest(self, digest, output_path, use_ai_images, image_api_key,
-                       illustration_mode, image_model):
+                       backend_mode, image_model, image_source="gemini"):
         count = int(digest.get('message_count') or 0)
         report_progress = lambda message: self._set_image_status(count, message)
         try:
             topic_images = []
             image_warning = ""
             poster = None
-            if use_ai_images and illustration_mode == "poster":
+            if use_ai_images and backend_mode == "poster":
                 try:
                     poster = generate_full_poster(
                         digest,
@@ -1722,19 +1765,19 @@ class WeChatSummaryApp:
                     report_progress("整图海报失败，正在改用本地排版...")
             elif use_ai_images:
                 illustration_requests = build_digest_illustration_requests(
-                    digest, detailed=illustration_mode == "detailed"
+                    digest, detailed=backend_mode == "detailed"
                 )
                 try:
                     topic_images = generate_topic_images(
                         illustration_requests,
                         image_api_key,
                         progress_callback=report_progress,
-                    cancel_event=self._cancel_event,
-                    provider="gemini",
-                    model=image_model or GEMINI_IMAGE_MODEL,
-                    mode="detailed" if illustration_mode == "detailed" else "sheet",
-                )
-                except RuntimeError as exc:
+                        cancel_event=self._cancel_event,
+                        provider=image_source,
+                        model=image_model or GEMINI_IMAGE_MODEL,
+                        mode="detailed" if backend_mode == "detailed" else "sheet",
+                    )
+                except (RuntimeError, ValueError) as exc:
                     if self._cancel_event.is_set():
                         raise
                     image_warning = str(exc)
@@ -1787,9 +1830,18 @@ class WeChatSummaryApp:
             return
         self._remember_provider_settings()
         use_images = self.ai_topic_images_var.get()
-        key = str(self.provider_keys.get('gemini') or '').strip()
-        if use_images and not key:
-            messagebox.showwarning('需要 Gemini Key', '请先填写 Gemini Key。')
+        backend_mode, image_source = self._current_illustration_spec()
+        if image_source == "nvidia":
+            key = str(self.provider_keys.get('nvidia') or '').strip()
+        elif image_source == "pollinations":
+            key = ""
+        else:
+            key = str(self.provider_keys.get('gemini') or '').strip()
+        if use_images and image_source == "gemini" and not key:
+            messagebox.showwarning('需要 Gemini Key', '请先填写 Gemini Key，或改选免费插画。')
+            return
+        if use_images and image_source == "nvidia" and not key:
+            messagebox.showwarning('需要 NVIDIA Key', '请先填写 NVIDIA Key，或改选 Pollinations（免 key）。')
             return
         digest = copy.deepcopy(self._last_digest)
         digest['template_id'] = self._template_id()
@@ -1804,8 +1856,8 @@ class WeChatSummaryApp:
         self.btn_cancel.config(state='normal')
         self._set_status('正在重画上一份日报，保留已确认的内容...')
         threading.Thread(target=self._render_digest,
-            args=(digest, path, use_images, key, self._current_illustration_mode(),
-                  self.image_model_var.get()), daemon=True).start()
+            args=(digest, path, use_images, key, backend_mode,
+                  self.image_model_var.get(), image_source), daemon=True).start()
 
     def _review_digest(self, digest):
         """后台等待用户编辑，所有 Tk 操作仍在主线程执行。"""

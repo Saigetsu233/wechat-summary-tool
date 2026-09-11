@@ -16,6 +16,7 @@ from topic_image_generator import (
     generate_full_poster,
     generate_topic_images,
     split_contact_sheet,
+    _generate_pollinations_image,
 )
 
 
@@ -107,7 +108,8 @@ class TopicImageGeneratorTests(unittest.TestCase):
         self.assertEqual(requests[0]["visual_prompt"], "snowboard trip")
         self.assertEqual(requests[6]["visual_prompt"], "winner portrait")
 
-    def test_generate_topic_images_calls_nvidia_once(self):
+    def test_generate_topic_images_nvidia_draws_per_panel(self):
+        # NVIDIA 是免费图源，改为逐格单画（FLUX 无法整齐切 12 宫格）。
         buffer = BytesIO()
         self._sheet().save(buffer, format="JPEG")
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -127,7 +129,7 @@ class TopicImageGeneratorTests(unittest.TestCase):
             provider="nvidia",
         )
 
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)  # 两个话题各一张
         self.assertEqual(calls[0][0], NVIDIA_IMAGE_ENDPOINT)
         self.assertEqual(calls[0][1]["json"]["height"], 768)
         self.assertEqual(calls[0][1]["timeout"], (20, 120))
@@ -383,6 +385,80 @@ class DetailedModeSlotTests(unittest.TestCase):
         self.assertEqual(len(images), 2)
         self.assertIsNone(images[1])
 
+
+
+class _GetResponse:
+    status_code = 200
+    text = ""
+
+    def __init__(self, content):
+        self.content = content
+
+    def raise_for_status(self):
+        return None
+
+
+def _png_bytes(size=(64, 64), color="white"):
+    buf = BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class FreeImageSourceTests(unittest.TestCase):
+    def test_pollinations_needs_no_key_and_calls_get_per_panel(self):
+        calls = []
+
+        def fake_get(url, params=None, timeout=None):
+            calls.append((url, params))
+            return _GetResponse(_png_bytes())
+
+        reqs = [
+            {"visual_prompt": "scene one", "_illustration_role": "topic"},
+            {"visual_prompt": "scene two", "_illustration_role": "topic"},
+        ]
+        images = generate_topic_images(
+            reqs, api_key="", provider="pollinations", mode="detailed",
+            get_fn=fake_get,
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(images), 2)
+        self.assertTrue(all(img is not None for img in images))
+        self.assertTrue(calls[0][0].startswith("https://image.pollinations.ai/prompt/"))
+
+    def test_pollinations_failure_yields_none_not_crash(self):
+        def boom(url, params=None, timeout=None):
+            raise OSError("network down")
+
+        img = _generate_pollinations_image("x", get_fn=boom)
+        self.assertIsNone(img)
+
+    def test_nvidia_free_source_draws_each_panel(self):
+        import base64 as _b64
+        encoded = _b64.b64encode(_png_bytes()).decode("ascii")
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            return _FakeResponse(encoded)
+
+        reqs = [
+            {"visual_prompt": "a", "_illustration_role": "topic"},
+            {"visual_prompt": "b", "_illustration_role": "topic"},
+        ]
+        images = generate_topic_images(
+            reqs, api_key="nvapi-key", provider="nvidia", mode="detailed",
+            request_fn=fake_post,
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(u == NVIDIA_IMAGE_ENDPOINT for u in calls))
+        self.assertEqual(len(images), 2)
+
+    def test_nvidia_requires_key(self):
+        with self.assertRaisesRegex(ValueError, "NVIDIA"):
+            generate_topic_images(
+                [{"visual_prompt": "a"}], api_key="", provider="nvidia",
+                mode="detailed",
+            )
 
 if __name__ == "__main__":
     unittest.main()

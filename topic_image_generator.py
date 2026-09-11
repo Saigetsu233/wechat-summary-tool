@@ -18,6 +18,8 @@ GEMINI_IMAGE_ENDPOINT = (
 NVIDIA_IMAGE_ENDPOINT = (
     "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.2-klein-4b"
 )
+# Pollinations 免 key 免费图片：GET，提示词放在 URL 里，返回图片本体。
+POLLINATIONS_ENDPOINT = "https://image.pollinations.ai/prompt/{prompt}"
 CONTACT_SHEET_COLS = 4
 CONTACT_SHEET_ROWS = 3
 MAX_TOPIC_IMAGES = 12
@@ -644,23 +646,46 @@ def _generate_images_from_prompt(selected, prompt, api_key, progress_callback=No
     return split_contact_sheet(sheet, len(selected)) if split_sheet else [sheet]
 
 
+def _generate_pollinations_image(prompt, cancel_event=None, get_fn=None):
+    """Pollinations 免 key 出图：GET 拿图片本体，失败返回 None。"""
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("任务已取消。")
+    get_fn = get_fn or requests.get
+    url = POLLINATIONS_ENDPOINT.format(prompt=quote(prompt[:900], safe=""))
+    params = {"width": 768, "height": 768, "nologo": "true", "model": "flux"}
+    try:
+        response = get_fn(url, params=params, timeout=(20, 120))
+        response.raise_for_status()
+        with Image.open(BytesIO(response.content)) as opened:
+            return opened.convert("RGB")
+    except (requests.RequestException, OSError, ValueError):
+        return None
+
+
+# 免费图片来源：不需要 key 的走 Pollinations，NVIDIA 免费端点需要免费 key。
+_FREE_IMAGE_PROVIDERS = {"pollinations", "nvidia"}
+
+
 def generate_topic_images(topics, api_key, progress_callback=None,
                           request_fn=requests.post, cancel_event=None,
-                          provider="gemini", model=None, mode="sheet"):
-    """生成插画：sheet 只请求一次；detailed 为每个栏目单独绘制。"""
+                          provider="gemini", model=None, mode="sheet",
+                          get_fn=None):
+    """生成插画：sheet 只请求一次；detailed / 免费来源为每个栏目单独绘制。"""
     selected = [item for item in topics if isinstance(item, dict)][:MAX_TOPIC_IMAGES]
     if not selected:
         return []
-    if not str(api_key or "").strip():
-        label = "Gemini" if provider == "gemini" else "NVIDIA"
+    # Pollinations 免 key；其它来源需要各自的 key。
+    if provider != "pollinations" and not str(api_key or "").strip():
+        label = {"gemini": "Gemini", "nvidia": "NVIDIA"}.get(provider, provider)
         raise ValueError(f"AI 话题配图需要 {label} API Key。")
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("任务已取消。")
     if mode not in {"sheet", "detailed"}:
         raise ValueError(f"不支持的插画模式：{mode}")
-    if mode == "detailed":
-        if provider != "gemini":
-            raise ValueError("精致插画模式目前仅支持 Gemini 图片模型。")
+
+    # 免费来源画不了整齐的 12 宫格联系表，一律逐格单独画（每张免费/低成本）。
+    per_panel = mode == "detailed" or provider in _FREE_IMAGE_PROVIDERS
+    if per_panel:
         illustrations = []
         total = sum(1 for item in selected if not item.get("_skip"))
         drawn = 0
@@ -672,20 +697,23 @@ def generate_topic_images(topics, api_key, progress_callback=None,
                 continue
             placement = str(item.get("_illustration_role") or "topic")
             drawn += 1
-            _notify(progress_callback, f"正在精绘第 {drawn}/{total} 张栏目插画...")
-            illustrations.extend(
-                _generate_images_from_prompt(
-                    [item],
-                    build_single_scene_prompt(item, placement=placement),
-                    api_key,
-                    progress_callback=progress_callback,
-                    request_fn=request_fn,
-                    cancel_event=cancel_event,
-                    provider=provider,
-                    model=model,
-                    split_sheet=False,
+            _notify(progress_callback, f"正在绘制第 {drawn}/{total} 张栏目插画...")
+            scene_prompt = build_single_scene_prompt(item, placement=placement)
+            if provider == "pollinations":
+                illustrations.append(
+                    _generate_pollinations_image(
+                        scene_prompt, cancel_event=cancel_event, get_fn=get_fn
+                    )
                 )
-            )
+            else:
+                illustrations.extend(
+                    _generate_images_from_prompt(
+                        [item], scene_prompt, api_key,
+                        progress_callback=progress_callback,
+                        request_fn=request_fn, cancel_event=cancel_event,
+                        provider=provider, model=model, split_sheet=False,
+                    )
+                )
         return illustrations
 
     _notify(progress_callback, f"正在让图片模型绘制 {len(selected)} 张话题插画...")
