@@ -101,6 +101,34 @@ def build_single_scene_prompt(topic, placement="topic"):
     )[:1150]
 
 
+def build_free_scene_prompt(topic, placement="topic"):
+    """免费图源（FLUX 系）专用：风格前置、反写实，尽量逼出卡通手绘感。
+
+    免费模型对风格词更迟钝、对多主体场景理解更弱，所以把手绘风格放在最前，
+    并明确列出画面主体，最后用反写实词压住它的写实倾向。
+    """
+    title = str(topic.get("title") or "group chat topic").strip()
+    summary = str(topic.get("summary") or topic.get("reason") or "").strip()
+    visual = str(topic.get("visual_prompt") or "").strip()
+    subject = (visual or f"{title}: {summary}")[:360]
+    # 实测：场景放前面才能保住每张的区分度，再用“扁平卡通、非照片”把写实压下去，
+    # 是免费 FLUX 上“既贴题又有插画感”的平衡点（风格词过多会导致每张都画成同一个角色）。
+    gender = str(topic.get("gender") or "unspecified").strip().lower()
+    portrait = ""
+    if placement == "rank":
+        portrait = {
+            "female": " Make the main character clearly female.",
+            "male": " Make the main character clearly male.",
+        }.get(gender, "")
+    return (
+        f"A colorful flat cartoon illustration, not a photo, not a 3D render: {subject}."
+        + portrait
+        + " Simple cel-shaded comic style, bold clean outlines, soft pastel colors, "
+        "plain background, show all the characters and objects clearly, one clear action. "
+        "No text, letters, numbers, logos, watermarks or borders."
+    )[:900]
+
+
 POSTER_LAYOUT_BRIEF = """\
 READ THIS FIRST: everything before the content block is an instruction addressed to
 you, and none of it may ever appear as text in the picture. Never letter words such as
@@ -657,9 +685,12 @@ def _generate_pollinations_image(prompt, cancel_event=None, get_fn=None):
         response = get_fn(url, params=params, timeout=(20, 120))
         response.raise_for_status()
         with Image.open(BytesIO(response.content)) as opened:
-            return opened.convert("RGB")
+            image = opened.convert("RGB")
     except (requests.RequestException, OSError, ValueError):
         return None
+    # Pollinations 免费版会在底部打 pollinations.ai 水印，裁掉底部一条即可。
+    width, height = image.size
+    return image.crop((0, 0, width, int(height * 0.94)))
 
 
 # 免费图片来源：不需要 key 的走 Pollinations，NVIDIA 免费端点需要免费 key。
@@ -698,7 +729,11 @@ def generate_topic_images(topics, api_key, progress_callback=None,
             placement = str(item.get("_illustration_role") or "topic")
             drawn += 1
             _notify(progress_callback, f"正在绘制第 {drawn}/{total} 张栏目插画...")
-            scene_prompt = build_single_scene_prompt(item, placement=placement)
+            # 免费图源用风格前置的提示词逼卡通感；Gemini 用原本的高细节提示词。
+            if provider in _FREE_IMAGE_PROVIDERS:
+                scene_prompt = build_free_scene_prompt(item, placement=placement)
+            else:
+                scene_prompt = build_single_scene_prompt(item, placement=placement)
             if provider == "pollinations":
                 illustrations.append(
                     _generate_pollinations_image(
